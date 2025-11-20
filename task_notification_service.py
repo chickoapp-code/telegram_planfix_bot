@@ -1,0 +1,319 @@
+"""
+Сервис для отправки уведомлений о новых заявках исполнителям.
+Использует те же фильтры, что и функция show_new_tasks в executor_handlers.py
+"""
+
+import logging
+from typing import List, Set, Dict
+from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from db_manager import DBManager
+from database import ExecutorProfile
+from planfix_client import planfix_client
+from config import (
+    PLANFIX_IT_TEMPLATES,
+    PLANFIX_SE_TEMPLATES,
+    PLANFIX_IT_TAG,
+    PLANFIX_SE_TAG,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_pf_id(value) -> int | None:
+    """Нормализует ID из Planfix (может быть строкой вида "task:123" или числом)."""
+    try:
+        if isinstance(value, str) and ':' in value:
+            value = value.split(':')[-1]
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_restaurant_ids(data) -> List[int]:
+    """Извлекает список ID ресторанов из данных исполнителя."""
+    ids = []
+    if not data:
+        return ids
+    
+    items = data if isinstance(data, list) else [data]
+    for item in items:
+        if isinstance(item, int):
+            ids.append(item)
+        elif isinstance(item, str):
+            try:
+                ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(item, dict):
+            val = item.get("id")
+            try:
+                if isinstance(val, int):
+                    ids.append(val)
+                elif isinstance(val, str):
+                    ids.append(int(val))
+            except (TypeError, ValueError):
+                continue
+    return ids
+
+
+def _get_allowed_template_ids(executor: ExecutorProfile) -> Set[int]:
+    """Возвращает множество разрешенных ID шаблонов для исполнителя."""
+    direction = (executor.service_direction or "").strip().lower()
+    allowed = set()
+    
+    if not direction or direction in ("it", "ит", "it отдел", "it-служба", "it служба"):
+        allowed.update(PLANFIX_IT_TEMPLATES.keys())
+    
+    if not direction or direction in ("se", "сэ", "служба эксплуатации", "эксплуатация", "отдел эксплуатации"):
+        allowed.update(PLANFIX_SE_TEMPLATES.keys())
+    
+    return allowed
+
+
+def _get_allowed_tags(executor: ExecutorProfile) -> Set[str]:
+    """Возвращает допустимые теги задач для исполнителя на основе направления."""
+    if not executor:
+        return {PLANFIX_IT_TAG, PLANFIX_SE_TAG}
+    
+    direction = (executor.service_direction or "").strip().lower()
+    tags: Set[str] = set()
+    
+    if not direction or direction in ("se", "сэ", "служба эксплуатации", "эксплуатация", "отдел эксплуатации"):
+        if PLANFIX_SE_TAG:
+            tags.add(PLANFIX_SE_TAG)
+    
+    if not direction or direction in ("it", "ит", "it отдел", "it-служба", "it служба"):
+        if PLANFIX_IT_TAG:
+            tags.add(PLANFIX_IT_TAG)
+    
+    if not tags:
+        if PLANFIX_SE_TAG:
+            tags.add(PLANFIX_SE_TAG)
+        if PLANFIX_IT_TAG:
+            tags.add(PLANFIX_IT_TAG)
+    
+    return tags
+
+
+def _extract_task_tags(task: dict) -> Set[str]:
+    """Извлекает множество тегов задачи в нижнем регистре."""
+    tags_field = task.get('tags')
+    names: Set[str] = set()
+    
+    if isinstance(tags_field, list):
+        for tag in tags_field:
+            if isinstance(tag, str):
+                name = tag.strip()
+            elif isinstance(tag, dict):
+                name = (
+                    tag.get('name')
+                    or tag.get('value')
+                    or tag.get('title')
+                    or ""
+                ).strip()
+            else:
+                name = ""
+            if name:
+                names.add(name.lower())
+    elif isinstance(tags_field, str):
+        name = tags_field.strip()
+        if name:
+            names.add(name.lower())
+    
+    return names
+
+
+class TaskNotificationService:
+    """Сервис для отправки уведомлений о новых заявках исполнителям."""
+    
+    def __init__(self, bot: Bot):
+        self.bot = bot
+        self.db_manager = DBManager()
+    
+    async def notify_executors_about_new_task(self, task_id: int):
+        """
+        Находит всех подходящих исполнителей для задачи и отправляет им уведомления.
+        Использует те же фильтры, что и show_new_tasks в executor_handlers.py
+        
+        Args:
+            task_id: ID задачи в Planfix
+        """
+        try:
+            # Получаем информацию о задаче
+            task_response = await planfix_client.get_task_by_id(
+                task_id,
+                fields="id,name,description,status,template,counterparty,tags,project"
+            )
+            
+            if not task_response or task_response.get('result') != 'success':
+                logger.warning(f"Could not get task {task_id} for executor notification")
+                return
+            
+            task = task_response.get('task', {})
+            task_name = task.get('name', 'Без названия')
+            
+            # Извлекаем данные задачи
+            template_id = _normalize_pf_id((task.get('template') or {}).get('id'))
+            counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
+            task_tags = _extract_task_tags(task)
+            
+            logger.info(
+                f"Notifying executors about task {task_id}: "
+                f"template_id={template_id}, counterparty_id={counterparty_id}, tags={task_tags}"
+            )
+            
+            # Получаем имя ресторана
+            counterparty_name = "Неизвестно"
+            if counterparty_id:
+                try:
+                    # Сначала проверяем кэш
+                    from shared_cache import cache as shared_cache
+                    cached_name = shared_cache.get(f"cp_name:{task_id}")
+                    if cached_name:
+                        counterparty_name = cached_name
+                    else:
+                        # Пытаемся получить из BotLog (как в executor_handlers)
+                        from database import BotLog
+                        with self.db_manager.get_db() as db:
+                            # Получаем все записи о создании задач и проверяем в Python
+                            bot_logs = db.query(BotLog).filter(
+                                BotLog.action == "create_task"
+                            ).order_by(BotLog.id.desc()).all()
+                            
+                            bot_log = None
+                            for log in bot_logs:
+                                if log.details:
+                                    try:
+                                        log_task_id = log.details.get('task_id')
+                                        if log_task_id is not None:
+                                            log_task_id_int = int(str(log_task_id).split(':')[-1])
+                                            if log_task_id_int == task_id:
+                                                bot_log = log
+                                                break
+                                    except (ValueError, TypeError, AttributeError):
+                                        continue
+                            
+                            if bot_log and bot_log.details:
+                                user_telegram_id = bot_log.details.get('user_telegram_id')
+                                if user_telegram_id:
+                                    from database import UserProfile
+                                    user = db.query(UserProfile).filter(
+                                        UserProfile.telegram_id == user_telegram_id
+                                    ).first()
+                                    if user and user.restaurant_contact_id:
+                                        # Используем restaurant_contact_id для получения имени
+                                        try:
+                                            contact_resp = await planfix_client.get_contact_by_id(
+                                                int(user.restaurant_contact_id),
+                                                fields="id,name"
+                                            )
+                                            if contact_resp and contact_resp.get('result') == 'success':
+                                                contact = contact_resp.get('contact', {}) or {}
+                                                counterparty_name = contact.get('name', 'Неизвестно')
+                                                # Кэшируем результат
+                                                shared_cache.set(f"cp_name:{task_id}", counterparty_name, ttl_seconds=24*3600)
+                                        except Exception:
+                                            pass
+                        
+                        # Если не получили из BotLog, пробуем напрямую из counterparty_id
+                        if counterparty_name == "Неизвестно":
+                            try:
+                                contact_resp = await planfix_client.get_contact_by_id(
+                                    counterparty_id,
+                                    fields="id,name"
+                                )
+                                if contact_resp and contact_resp.get('result') == 'success':
+                                    contact = contact_resp.get('contact', {}) or {}
+                                    counterparty_name = contact.get('name', 'Неизвестно')
+                                    # Кэшируем результат
+                                    shared_cache.set(f"cp_name:{task_id}", counterparty_name, ttl_seconds=24*3600)
+                            except Exception:
+                                pass
+                except Exception as name_err:
+                    logger.debug(f"Could not get counterparty name for task {task_id}: {name_err}")
+            
+            # Получаем всех активных исполнителей
+            with self.db_manager.get_db() as db:
+                executors = db.query(ExecutorProfile).filter(
+                    ExecutorProfile.profile_status == "активен"
+                ).all()
+            
+            notified_count = 0
+            
+            for executor in executors:
+                # Применяем те же фильтры, что и в show_new_tasks
+                
+                # Фильтр 1: Шаблон задачи должен быть в списке разрешенных шаблонов исполнителя
+                allowed_templates = _get_allowed_template_ids(executor)
+                if allowed_templates:
+                    if template_id is None or template_id not in allowed_templates:
+                        logger.debug(
+                            f"Executor {executor.telegram_id} filtered out: "
+                            f"template {template_id} not in {allowed_templates}"
+                        )
+                        continue
+                
+                # Фильтр 2: Ресторан (counterparty) должен быть в списке обслуживаемых ресторанов
+                allowed_restaurant_ids = set(_extract_restaurant_ids(executor.serving_restaurants))
+                if allowed_restaurant_ids:
+                    if counterparty_id is None or counterparty_id not in allowed_restaurant_ids:
+                        logger.debug(
+                            f"Executor {executor.telegram_id} filtered out: "
+                            f"counterparty {counterparty_id} not in {allowed_restaurant_ids}"
+                        )
+                        continue
+                
+                # Фильтр 3: Теги задачи должны пересекаться с разрешенными тегами исполнителя
+                allowed_tags = _get_allowed_tags(executor)
+                allowed_tag_names = {tag.lower() for tag in allowed_tags if isinstance(tag, str)}
+                if allowed_tag_names and task_tags:
+                    if not (task_tags & allowed_tag_names):
+                        logger.debug(
+                            f"Executor {executor.telegram_id} filtered out: "
+                            f"task tags {task_tags} don't match allowed tags {allowed_tag_names}"
+                        )
+                        continue
+                
+                # Все фильтры пройдены - отправляем уведомление
+                try:
+                    message = (
+                        f"🆕 Новая заявка #{task_id}\n\n"
+                        f"📝 {task_name}\n"
+                        f"🏪 Ресторан: {counterparty_name}\n"
+                        f"📊 Статус: Новая\n\n"
+                        f"Примите задачу в работу, если она вам подходит."
+                    )
+                    
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text="✅ Принять в работу",
+                                callback_data=f"accept:{task_id}"
+                            )]
+                        ]
+                    )
+                    
+                    await self.bot.send_message(
+                        executor.telegram_id,
+                        message,
+                        reply_markup=keyboard
+                    )
+                    
+                    notified_count += 1
+                    logger.info(f"✅ Notification sent to executor {executor.telegram_id} for task {task_id}")
+                    
+                except Exception as send_err:
+                    logger.error(
+                        f"Failed to send notification to executor {executor.telegram_id} "
+                        f"for task {task_id}: {send_err}"
+                    )
+            
+            logger.info(
+                f"✅ Notified {notified_count} executor(s) about new task {task_id} "
+                f"(total executors checked: {len(executors)})"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error notifying executors about new task {task_id}: {e}", exc_info=True)
+
