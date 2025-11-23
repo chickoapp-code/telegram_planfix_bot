@@ -1234,6 +1234,101 @@ async def process_planfix_user_id(message: Message, state: FSMContext):
     logger.info(f"Executor {executor_id} approved with Planfix User ID {planfix_user_id}")
 
 
+@router.message(Command("set_executor_planfix_id"))
+async def cmd_set_executor_planfix_id(message: Message, state: FSMContext):
+    """Команда для установки Planfix Contact ID существующему исполнителю (только для админов)."""
+    if message.from_user.id not in TELEGRAM_ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer(
+                "❌ Использование: /set_executor_planfix_id <telegram_id>\n\n"
+                "Пример: /set_executor_planfix_id 466085358"
+            )
+            return
+        
+        executor_id = int(parts[1])
+    except (IndexError, ValueError):
+        await message.answer("❌ Использование: /set_executor_planfix_id <telegram_id>")
+        return
+    
+    executor = await db_manager.get_executor_profile(executor_id)
+    
+    if not executor:
+        await message.answer(f"❌ Исполнитель с ID {executor_id} не найден.")
+        return
+    
+    await message.answer(
+        f"👤 Исполнитель: {executor.full_name}\n"
+        f"📱 Telegram ID: {executor_id}\n"
+        f"📋 Текущий Planfix Contact ID: {executor.planfix_user_id or 'не установлен'}\n"
+        f"📋 Planfix Contact ID (из профиля): {executor.planfix_contact_id or 'не установлен'}\n\n"
+        f"📝 Введите Planfix Contact ID (ID контакта в Planfix):\n\n"
+        f"💡 Это должен быть ID контакта, созданного при регистрации исполнителя в Planfix."
+    )
+    await state.update_data(executor_id_to_update=executor_id)
+    await state.set_state(AdminExecutorApproval.waiting_for_planfix_contact_id)
+
+
+@router.message(AdminExecutorApproval.waiting_for_planfix_contact_id)
+async def process_planfix_contact_id(message: Message, state: FSMContext):
+    """Обработка ввода Planfix Contact ID администратором."""
+    if message.from_user.id not in TELEGRAM_ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для выполнения этой команды.")
+        await state.clear()
+        return
+    
+    planfix_contact_id = message.text.strip()
+    
+    # Проверяем, что введено число
+    if not planfix_contact_id.isdigit():
+        await message.answer(
+            "❌ Planfix Contact ID должен быть числом.\n\n"
+            "Попробуйте ещё раз или используйте /cancel для отмены."
+        )
+        return
+    
+    user_data = await state.get_data()
+    executor_id = user_data.get('executor_id_to_update')
+    
+    executor = await db_manager.get_executor_profile(executor_id)
+    
+    if not executor:
+        await message.answer(f"❌ Исполнитель с ID {executor_id} не найден.")
+        await state.clear()
+        return
+    
+    # Обновляем planfix_user_id (используем ID контакта)
+    await db_manager.update_executor_profile(
+        executor_id,
+        planfix_user_id=planfix_contact_id,
+        planfix_contact_id=planfix_contact_id
+    )
+    
+    await message.answer(
+        f"✅ Planfix Contact ID обновлён для исполнителя {executor.full_name} (ID: {executor_id})\n\n"
+        f"📋 Planfix Contact ID: {planfix_contact_id}\n\n"
+        f"Теперь исполнитель сможет использовать все функции бота."
+    )
+    
+    # Уведомляем исполнителя
+    try:
+        await message.bot.send_message(
+            executor_id,
+            f"✅ Ваш профиль обновлён!\n\n"
+            f"Теперь ваш профиль связан с контактом Planfix (ID: {planfix_contact_id}).\n"
+            f"Вы можете использовать все функции бота."
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify executor {executor_id}: {e}")
+    
+    await state.clear()
+    logger.info(f"Updated planfix_user_id for executor {executor_id} to {planfix_contact_id}")
+
+
 @router.message(Command("reject_executor"))
 async def cmd_reject_executor(message: Message):
     """Команда для отклонения регистрации исполнителя (только для админов)."""

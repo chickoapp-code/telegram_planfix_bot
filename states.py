@@ -77,6 +77,7 @@ class TaskCancellation(StatesGroup):
 class AdminExecutorApproval(StatesGroup):
     """Состояния подтверждения исполнителя администратором."""
     waiting_for_planfix_user_id = State()  # Ввод Planfix User ID
+    waiting_for_planfix_contact_id = State()  # Ввод Planfix Contact ID
 
 
 class ExecutorProfileEdit(StatesGroup):
