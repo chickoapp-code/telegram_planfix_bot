@@ -23,6 +23,7 @@
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -266,6 +267,38 @@ async def main():
         logger.info("Application stopped.")
 
 
+def setup_signal_handlers():
+    """Настраивает обработчики сигналов для корректного завершения."""
+    loop = asyncio.get_event_loop()
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler(sig):
+        logger.info(f"Received signal {sig}, initiating graceful shutdown...")
+        shutdown_event.set()
+    
+    # Обработка SIGTERM (от systemd) и SIGINT (Ctrl+C)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    
+    return shutdown_event
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Настраиваем обработчики сигналов только в Linux
+    if sys.platform != 'win32':
+        try:
+            shutdown_event = setup_signal_handlers()
+        except NotImplementedError:
+            # Windows не поддерживает add_signal_handler
+            shutdown_event = None
+    else:
+        shutdown_event = None
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 

@@ -12,3 +12,7 @@ venv/
 dist/
 build/
 
+# Logs directory
+logs/
+bot_errors.log
+

@@ -1,0 +1,96 @@
+#!/bin/bash
+# Скрипт установки systemd сервиса
+# Использование: sudo ./install_service.sh
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Проверка прав root
+if [ "$EUID" -ne 0 ]; then 
+    echo "❌ Этот скрипт должен быть запущен с правами root (sudo)"
+    exit 1
+fi
+
+# Определяем пользователя и группу из текущей директории
+PROJECT_USER=$(stat -c '%U' "$SCRIPT_DIR")
+PROJECT_GROUP=$(stat -c '%G' "$SCRIPT_DIR")
+PROJECT_DIR="$SCRIPT_DIR"
+
+echo "📋 Параметры установки:"
+echo "   Пользователь: $PROJECT_USER"
+echo "   Группа: $PROJECT_GROUP"
+echo "   Директория проекта: $PROJECT_DIR"
+echo ""
+
+# Создаем директорию для логов
+LOG_DIR="$PROJECT_DIR/logs"
+mkdir -p "$LOG_DIR"
+chown "$PROJECT_USER:$PROJECT_GROUP" "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+echo "✅ Создана директория для логов: $LOG_DIR"
+
+# Определяем путь к Python в venv
+VENV_PYTHON="$PROJECT_DIR/venv/bin/python3"
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "❌ Python в venv не найден: $VENV_PYTHON"
+    echo "   Убедитесь, что виртуальное окружение создано и активировано"
+    exit 1
+fi
+
+# Создаем временный service файл с правильными путями
+SERVICE_FILE="/tmp/telegram-planfix-bot.service"
+cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=Telegram Planfix Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=$PROJECT_USER
+Group=$PROJECT_GROUP
+WorkingDirectory=$PROJECT_DIR
+Environment="PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="SYSTEMD_SERVICE=1"
+Environment="LOG_DIR=$LOG_DIR"
+ExecStart=$VENV_PYTHON $PROJECT_DIR/run.py --mode both
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Ограничения ресурсов (опционально)
+# LimitNOFILE=65536
+# MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Копируем service файл
+SYSTEMD_SERVICE="/etc/systemd/system/telegram-planfix-bot.service"
+cp "$SERVICE_FILE" "$SYSTEMD_SERVICE"
+echo "✅ Service файл скопирован в $SYSTEMD_SERVICE"
+
+# Перезагружаем systemd
+systemctl daemon-reload
+echo "✅ Systemd перезагружен"
+
+# Включаем автозапуск
+systemctl enable telegram-planfix-bot
+echo "✅ Автозапуск включен"
+
+echo ""
+echo "✅ Установка завершена!"
+echo ""
+echo "Для управления сервисом используйте:"
+echo "  sudo systemctl start telegram-planfix-bot    # Запуск"
+echo "  sudo systemctl stop telegram-planfix-bot     # Остановка"
+echo "  sudo systemctl restart telegram-planfix-bot  # Перезапуск"
+echo "  sudo systemctl status telegram-planfix-bot   # Статус"
+echo "  sudo journalctl -u telegram-planfix-bot -f   # Логи"
+echo ""
+echo "Для запуска сервиса выполните:"
+echo "  sudo systemctl start telegram-planfix-bot"
+
