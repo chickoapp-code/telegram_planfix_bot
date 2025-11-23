@@ -207,6 +207,7 @@ def get_direction_tag(direction: str | None) -> str | None:
 async def get_contacts_by_group(planfix_client, group_id: int) -> Dict[int, str]:
     """
     Получает контакты из группы Planfix и возвращает словарь {contact_id: contact_name}.
+    Автоматически исключает контакты из группы "Поддержка".
     
     Args:
         planfix_client: Экземпляр PlanfixAPIClient
@@ -216,6 +217,30 @@ async def get_contacts_by_group(planfix_client, group_id: int) -> Dict[int, str]
         Словарь {contact_id: contact_name} или пустой словарь при ошибке
     """
     try:
+        from typing import Set
+        
+        # Множество контактов, которые находятся в группе "Поддержка" (для исключения)
+        support_contact_ids: Set[int] = set()
+        
+        # Сначала получаем все контакты из группы "Поддержка", чтобы исключить их
+        if SUPPORT_CONTACT_GROUP_ID:
+            try:
+                support_contacts_response = await planfix_client.get_contact_list_by_group(
+                    SUPPORT_CONTACT_GROUP_ID, fields="id", page_size=1000
+                )
+                if support_contacts_response and support_contacts_response.get('result') == 'success':
+                    for c in support_contacts_response.get('contacts', []):
+                        try:
+                            cid = int(c.get('id'))
+                            support_contact_ids.add(cid)
+                        except (TypeError, ValueError):
+                            continue
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to load support group contacts for filtering: {e}")
+        
+        # Теперь загружаем контакты из запрошенной группы, исключая те, что в группе "Поддержка"
         contacts_response = await planfix_client.get_contact_list_by_group(
             group_id, fields="id,name", page_size=100
         )
@@ -227,6 +252,11 @@ async def get_contacts_by_group(planfix_client, group_id: int) -> Dict[int, str]
         for c in contacts_response.get('contacts', []):
             try:
                 cid = int(c.get('id'))
+                
+                # Пропускаем контакты, которые находятся в группе "Поддержка"
+                if cid in support_contact_ids:
+                    continue
+                
                 name = c.get('name') or f"Контакт {cid}"
                 contacts[cid] = name
             except (TypeError, ValueError):

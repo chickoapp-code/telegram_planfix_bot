@@ -132,19 +132,16 @@ async def edit_franchise_process(callback_query: CallbackQuery, state: FSMContex
     await state.update_data(new_franchise_id=franchise_group_id)
     
     try:
-        contacts_response = await planfix_client.get_contact_list_by_group(
-            franchise_group_id,
-            fields="id,name",
-            page_size=100
-        )
+        # Используем функцию get_contacts_by_group, которая автоматически фильтрует контакты из группы поддержки
+        from config import get_contacts_by_group
+        contacts = await get_contacts_by_group(planfix_client, franchise_group_id)
         
-        if not contacts_response or contacts_response.get('result') != 'success':
+        if not contacts:
             await callback_query.message.edit_text("❌ Не удалось загрузить рестораны.")
             await state.clear()
             return
         
-        contacts = contacts_response.get('contacts', [])
-        keyboard_items = [(str(c['id']), c['name']) for c in contacts]
+        keyboard_items = [(str(cid), name) for cid, name in sorted(contacts.items(), key=lambda x: x[1])]
         keyboard = create_dynamic_keyboard(keyboard_items, add_cancel_button=True)
         
         await callback_query.message.edit_text(
@@ -171,18 +168,15 @@ async def edit_restaurant_start(callback_query: CallbackQuery, state: FSMContext
         return
     
     try:
-        contacts_response = await planfix_client.get_contact_list_by_group(
-            user.franchise_group_id,
-            fields="id,name",
-            page_size=100
-        )
+        # Используем функцию get_contacts_by_group, которая автоматически фильтрует контакты из группы поддержки
+        from config import get_contacts_by_group
+        contacts = await get_contacts_by_group(planfix_client, user.franchise_group_id)
         
-        if not contacts_response or contacts_response.get('result') != 'success':
+        if not contacts:
             await callback_query.message.edit_text("❌ Не удалось загрузить рестораны.")
             return
         
-        contacts = contacts_response.get('contacts', [])
-        keyboard_items = [(str(c['id']), c['name']) for c in contacts]
+        keyboard_items = [(str(cid), name) for cid, name in sorted(contacts.items(), key=lambda x: x[1])]
         keyboard = create_dynamic_keyboard(keyboard_items, add_cancel_button=True)
         
         await callback_query.message.edit_text(
