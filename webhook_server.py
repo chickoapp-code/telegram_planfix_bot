@@ -76,8 +76,20 @@ class PlanfixWebhookHandler:
                         
                         task = task_response.get('task', {})
                         status_raw = task.get('status', {})
-                        status_id = self._normalize_status_id(status_raw.get('id'))
-                        status_name = status_raw.get('name', 'Unknown')
+                        # Проверяем все возможные варианты получения статуса
+                        status_id_raw = (
+                            status_raw.get('id') or 
+                            status_raw.get('task.status.id') or 
+                            status_raw.get('task.status.Идентификатор')
+                        )
+                        status_id = self._normalize_status_id(status_id_raw)
+                        status_name = (
+                            status_raw.get('name') or 
+                            status_raw.get('task.status.name') or 
+                            status_raw.get('task.status.Активный') or
+                            status_raw.get('task.status.Статус') or
+                            'Unknown'
+                        )
                         
                         logger.info(f"Registration task {task_id} for executor {executor.telegram_id}: status_id={status_id}, status_name='{status_name}'")
                         
@@ -209,7 +221,14 @@ class PlanfixWebhookHandler:
             await self.notification_service.notify_new_task(task_id, project_id)
             
             # Сохраняем начальный статус в кэш
-            status_id = self._normalize_status_id(task.get('status', {}).get('id'))
+            # Получаем статус из всех возможных мест
+            status_obj = task.get('status', {})
+            status_id_raw = (
+                status_obj.get('id') or 
+                status_obj.get('task.status.id') or 
+                status_obj.get('task.status.Идентификатор')
+            )
+            status_id = self._normalize_status_id(status_id_raw)
             if status_id:
                 self._task_status_cache[task_id] = status_id
                 
@@ -243,7 +262,22 @@ class PlanfixWebhookHandler:
                 return
             
             # Получаем новый статус
-            new_status_id = self._normalize_status_id(task.get('status', {}).get('id'))
+            # Planfix может передавать статус в разных форматах:
+            # 1. task.status.id и task.status.name (стандартный формат)
+            # 2. task.status["task.status.id"] и task.status["task.status.name"] (альтернативный формат из шаблона)
+            status_obj = task.get('status', {})
+            status_id_raw = (
+                status_obj.get('id') or 
+                status_obj.get('task.status.id') or 
+                status_obj.get('task.status.Идентификатор')  # На случай если переменная не подставилась
+            )
+            status_name_raw = (
+                status_obj.get('name') or 
+                status_obj.get('task.status.name') or 
+                status_obj.get('task.status.Активный') or
+                status_obj.get('task.status.Статус')  # На случай если переменная не подставилась
+            )
+            new_status_id = self._normalize_status_id(status_id_raw)
             old_status_id = self._task_status_cache.get(task_id)
             
             # Получаем назначенных исполнителей
@@ -327,7 +361,15 @@ class PlanfixWebhookHandler:
                     logger.warning(f"No executor found for registration task {task_id}. This may be because the task was created with generalId but webhook sends id.")
                 
                 if executor:
-                    status_name = task.get('status', {}).get('name', 'Unknown')
+                    # Получаем имя статуса из всех возможных мест
+                    status_obj = task.get('status', {})
+                    status_name = (
+                        status_obj.get('name') or 
+                        status_obj.get('task.status.name') or 
+                        status_obj.get('task.status.Активный') or
+                        status_obj.get('task.status.Статус') or
+                        'Unknown'
+                    )
                     logger.info(f"Found registration task {task_id} for executor {executor.telegram_id}, status_id={new_status_id}, status_name='{status_name}'")
                     
                     # Проверяем по ID и по имени статуса (на случай если ID не совпадает)
