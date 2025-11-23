@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     planfix_poll_interval: int = Field(default=60, alias="PLANFIX_POLL_INTERVAL")
 
+    # Webhook server configuration
+    webhook_host: str = Field(default="127.0.0.1", alias="WEBHOOK_HOST")
+    webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
+
     telegram_admin_ids: List[int] = Field(default_factory=list, alias="TELEGRAM_ADMIN_IDS")
 
     @field_validator("telegram_admin_ids", mode="before")

@@ -1,0 +1,147 @@
+# Настройка Webhook от Planfix
+
+## Важно: Разница между входящими и исходящими webhook
+
+**Входящие webhook** (описаны в [документации Planfix](https://planfix.com/ru/help/%D0%92%D1%85%D0%BE%D0%B4%D1%8F%D1%89%D0%B8%D0%B5_%D0%B2%D0%B5%D0%B1%D1%85%D1%83%D0%BA%D0%B8)) - это когда **мы отправляем данные В Planfix** через HTTP-запросы.
+
+**Исходящие webhook** (нужны нам) - это когда **Planfix отправляет уведомления НА наш сервер** при изменении задач, комментариев и т.д.
+
+## Настройка исходящих webhook в Planfix
+
+Для получения уведомлений от Planfix на наш сервер необходимо настроить **автоматические сценарии** в Planfix, которые будут отправлять POST-запросы на наш webhook-сервер при определенных событиях.
+
+### Шаг 1: Убедитесь, что webhook-сервер доступен
+
+Ваш webhook-сервер должен быть доступен по публичному URL. Например:
+- `https://your-domain.com/planfix/webhook` (рекомендуется с HTTPS)
+- Или используйте туннель (ngrok, cloudflared) для разработки
+
+### Шаг 2: Настройка автоматических сценариев в Planfix
+
+1. Войдите в Planfix и перейдите в **Управление аккаунтом** → **Автоматические сценарии**
+2. Создайте новый сценарий для каждого типа события:
+
+#### Сценарий 1: Создание задачи (`task.create`)
+
+**Условия:**
+- Событие: Создание задачи
+- Процесс: Ваш процесс задач (указан в `PLANFIX_TASK_PROCESS_ID`)
+
+**Действия:**
+- Отправить HTTP-запрос (POST)
+- URL: `https://your-domain.com/planfix/webhook`
+- Метод: POST
+- Content-Type: `application/json`
+- Тело запроса (JSON):
+```json
+{
+  "event": "task.create",
+  "task": {
+    "id": "{{Task.ID}}",
+    "name": "{{Task.Name}}",
+    "status": {
+      "id": "{{Task.Status.ID}}",
+      "name": "{{Task.Status.Name}}"
+    },
+    "project": {
+      "id": "{{Task.Project.ID}}"
+    }
+  }
+}
+```
+
+#### Сценарий 2: Обновление задачи (`task.update`)
+
+**Условия:**
+- Событие: Изменение задачи
+- Процесс: Ваш процесс задач
+
+**Действия:**
+- Отправить HTTP-запрос (POST)
+- URL: `https://your-domain.com/planfix/webhook`
+- Метод: POST
+- Content-Type: `application/json`
+- Тело запроса (JSON):
+```json
+{
+  "event": "task.update",
+  "task": {
+    "id": "{{Task.ID}}",
+    "name": "{{Task.Name}}",
+    "status": {
+      "id": "{{Task.Status.ID}}",
+      "name": "{{Task.Status.Name}}"
+    },
+    "project": {
+      "id": "{{Task.Project.ID}}"
+    },
+    "assignees": {
+      "users": [
+        {
+          "id": "{{Task.Assignee.ID}}",
+          "name": "{{Task.Assignee.Name}}"
+        }
+      ]
+    }
+  }
+}
+```
+
+#### Сценарий 3: Добавление комментария (`comment.create`)
+
+**Условия:**
+- Событие: Добавление комментария к задаче
+- Процесс: Ваш процесс задач
+
+**Действия:**
+- Отправить HTTP-запрос (POST)
+- URL: `https://your-domain.com/planfix/webhook`
+- Метод: POST
+- Content-Type: `application/json`
+- Тело запроса (JSON):
+```json
+{
+  "event": "comment.create",
+  "task": {
+    "id": "{{Task.ID}}"
+  },
+  "comment": {
+    "id": "{{Comment.ID}}",
+    "description": "{{Comment.Description}}",
+    "owner": {
+      "id": "{{Comment.Owner.ID}}",
+      "name": "{{Comment.Owner.Name}}"
+    }
+  }
+}
+```
+
+### Шаг 3: Проверка работы
+
+1. Запустите webhook-сервер:
+   ```bash
+   python run.py --mode webhook
+   # или
+   python run.py --mode both
+   ```
+
+2. Создайте или измените задачу в Planfix
+3. Проверьте логи webhook-сервера - должны появиться записи о полученных событиях
+
+## Альтернативный способ: Polling
+
+Если настройка webhook через автоматические сценарии сложна, бот также поддерживает **polling** - периодический опрос Planfix API для проверки изменений. Это работает автоматически при запуске бота в режиме `polling` или `both`.
+
+## Безопасность
+
+⚠️ **Важно:** 
+- Используйте HTTPS для webhook URL в продакшене
+- Рассмотрите возможность добавления аутентификации (токен в заголовках или параметрах)
+- Ограничьте доступ по IP, если возможно
+
+## Полезные ссылки
+
+- [Документация Planfix: HTTP-запросы](https://planfix.com/ru/help/HTTP-%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D1%8B)
+- [Документация Planfix: Автоматические сценарии](https://planfix.com/ru/help/%D0%90%D0%B2%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5_%D1%81%D1%86%D0%B5%D0%BD%D0%B0%D1%80%D0%B8%D0%B8)
+- [Документация Planfix: Входящие вебхуки](https://planfix.com/ru/help/%D0%92%D1%85%D0%BE%D0%B4%D1%8F%D1%89%D0%B8%D0%B5_%D0%B2%D0%B5%D0%B1%D1%85%D1%83%D0%BA%D0%B8)
+

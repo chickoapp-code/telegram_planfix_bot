@@ -30,6 +30,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiohttp import web
 
 from config import BOT_TOKEN
+from config.settings import settings
 from database import init_db
 from executor_handlers import router as executor_router
 from logging_config import setup_logging
@@ -143,7 +144,16 @@ async def run_both(bot: Bot, dp: Dispatcher, webhook_host: str = '0.0.0.0', webh
     site = web.TCPSite(runner, webhook_host, webhook_port)
     await site.start()
     logger.info(f"🚀 Webhook server started on {webhook_host}:{webhook_port}")
-    logger.info(f"📡 Webhook URL: http://{webhook_host}:{webhook_port}/planfix/webhook")
+    
+    # Показываем правильный URL в зависимости от хоста
+    if webhook_host == '0.0.0.0':
+        logger.info(f"📡 Webhook доступен на всех интерфейсах: http://<your-ip>:{webhook_port}/planfix/webhook")
+        logger.info(f"📡 Локальный URL: http://127.0.0.1:{webhook_port}/planfix/webhook")
+    elif webhook_host == '127.0.0.1':
+        logger.info(f"📡 Webhook URL (только локальный доступ): http://127.0.0.1:{webhook_port}/planfix/webhook")
+        logger.info(f"💡 Для получения webhook от Planfix используйте nginx или другой прокси")
+    else:
+        logger.info(f"📡 Webhook URL: http://{webhook_host}:{webhook_port}/planfix/webhook")
     
     # Запускаем polling в фоне
     polling_task = asyncio.create_task(run_polling(bot, dp))
@@ -187,18 +197,31 @@ async def main():
     
     parser.add_argument(
         '--webhook-host',
-        default='0.0.0.0',
-        help='Хост для webhook сервера (по умолчанию: 0.0.0.0)'
+        default=None,
+        help=f'Хост для webhook сервера (по умолчанию: {settings.webhook_host} из .env или 127.0.0.1)'
     )
     
     parser.add_argument(
         '-p', '--webhook-port',
         type=int,
-        default=8080,
-        help='Порт для webhook сервера (по умолчанию: 8080)'
+        default=None,
+        help=f'Порт для webhook сервера (по умолчанию: {settings.webhook_port} из .env или 8080)'
     )
     
     args = parser.parse_args()
+    
+    # Определяем хост и порт для webhook (приоритет: аргументы командной строки > .env > значения по умолчанию)
+    webhook_host = args.webhook_host if args.webhook_host is not None else settings.webhook_host
+    webhook_port = args.webhook_port if args.webhook_port is not None else settings.webhook_port
+    
+    # Предупреждение о безопасности, если используется 0.0.0.0
+    if webhook_host == '0.0.0.0':
+        logger.warning("=" * 80)
+        logger.warning("⚠️  ВНИМАНИЕ: Webhook сервер запущен на 0.0.0.0 (все интерфейсы)")
+        logger.warning("⚠️  Это означает, что сервер доступен извне!")
+        logger.warning("⚠️  Для безопасности рекомендуется использовать 127.0.0.1")
+        logger.warning("⚠️  Если нужен публичный доступ, используйте nginx или другой прокси")
+        logger.warning("=" * 80)
     
     # Инициализация базы данных
     logger.info("Initializing database...")
@@ -222,13 +245,13 @@ async def main():
             logger.info("=" * 80)
             logger.info("⚠️  Note: Bot polling is not started. Only webhook server is running.")
             logger.info("⚠️  Make sure to set webhook URL in Telegram Bot API if needed.")
-            await run_webhook_server(bot, args.webhook_host, args.webhook_port)
+            await run_webhook_server(bot, webhook_host, webhook_port)
             
         elif args.mode == 'both':
             logger.info("=" * 80)
             logger.info("Starting in BOTH mode (Polling + Webhook Server)")
             logger.info("=" * 80)
-            await run_both(bot, dp, args.webhook_host, args.webhook_port)
+            await run_both(bot, dp, webhook_host, webhook_port)
             
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user")
