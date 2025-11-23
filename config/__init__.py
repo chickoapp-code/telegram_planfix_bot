@@ -92,6 +92,14 @@ TELEGRAM_ADMIN_IDS = settings.telegram_admin_ids
 # --------------------------------------------------------------------------------------
 
 FRANCHISE_GROUPS: Dict[int, Dict[str, object]] = {
+    12: {
+        "name": "Мясоroob",
+        "project_id": None,
+    },
+    14: {
+        "name": "Аджикинежаль",
+        "project_id": None,
+    },
     16: {
         "name": "У Беллуччи Круче",
         "project_id": None,
@@ -104,19 +112,11 @@ FRANCHISE_GROUPS: Dict[int, Dict[str, object]] = {
         "name": "CHICKO",
         "project_id": None,
     },
-    12: {
-        "name": "Мясоroob",
-        "project_id": None,
-    },
-    14: {
-        "name": "Аджикинежаль",
-        "project_id": None,
-    },
-    24: {
+    28: {
         "name": "Во все ребра",
         "project_id": None,
     },
-    26: {
+    30: {
         "name": "ДжоДжа",
         "project_id": None,
     },

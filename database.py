@@ -30,7 +30,7 @@ class UserProfile(Base):
     position = Column(String(100), nullable=True)
     
     # Привязка к Planfix (новая архитектура)
-    franchise_group_id = Column(Integer, nullable=False, index=True)  # ID группы контактов (12, 14, 16, 18, 20, 22)
+    franchise_group_id = Column(Integer, nullable=False, index=True)  # ID группы контактов (12, 14, 16, 20, 22, 28, 30)
     restaurant_contact_id = Column(Integer, nullable=False, index=True)  # ID контакта ресторана в Planfix
     restaurant_directory_key = Column(String(50), nullable=True)  # Ключ записи справочника для поля 16
     
@@ -61,7 +61,7 @@ class ExecutorProfile(Base):
     position_role = Column(String(100), nullable=True)
     
     # Зоны ответственности (список ID групп франчайзи)
-    serving_franchise_groups = Column(JSON, nullable=False, default=list)  # [12, 14, 16, 18, 20, 22]
+    serving_franchise_groups = Column(JSON, nullable=False, default=list)  # [12, 14, 16, 20, 22, 28, 30]
     serving_restaurants = Column(JSON, nullable=True, default=list)
     service_direction = Column(String(50), nullable=True)
     
