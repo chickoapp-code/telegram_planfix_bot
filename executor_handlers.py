@@ -1003,12 +1003,12 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 
                 # Добавляем задачу в отслеживание polling сервиса
                 # Это нужно для автоматического отслеживания изменений статуса
-                logger.info(f"Registration task {task_id} added to polling tracking for executor {callback_query.from_user.id}")
+                logger.info(f"Registration task {registration_task_id} added to polling tracking for executor {callback_query.from_user.id}")
                 
                 # Отправляем ув��домление администраторам
                 admin_message = (
                     f"🆕 Создана задача в Planfix для подтверждения регистрации исполнителя:\n\n"
-                    f"📋 Задача #{task_id}\n"
+                    f"📋 Задача #{general_id if general_id else registration_task_id}\n"
                     f"👤 ФИО: {user_data['full_name']}\n"
                     f"🏢 Концепции: {', '.join(concept_names)}\n"
                     f"🏪 Рестораны: {', '.join(restaurant_names) if restaurant_names else 'Не выбраны'}\n\n"

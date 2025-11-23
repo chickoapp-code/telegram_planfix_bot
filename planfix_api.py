@@ -607,8 +607,9 @@ class PlanfixAPIClient:
             data["position"] = position
         
         # Добавляем Telegram если указан
-        # Согласно swagger.json, есть два поля: telegram (URL) и telegramId (ID)
-        # telegram должен быть в формате "https://t.me/username"
+        # Согласно swagger.json, есть два поля: telegram (URL или username) и telegramId (ID)
+        # telegram должен быть в формате "https://t.me/username" для пользователей с username
+        # Для пользователей без username лучше не заполнять поле telegram, только telegramId
         if telegram:
             # Если telegram начинается с @, убираем его
             telegram_clean = telegram.lstrip('@').strip()
@@ -616,13 +617,8 @@ class PlanfixAPIClient:
                 # Всегда формируем полный URL согласно swagger.json
                 data["telegram"] = f"https://t.me/{telegram_clean}"
                 logger.debug(f"Setting telegram field to: {data['telegram']}")
-        elif telegram_id:
-            # Если нет username, но есть telegram_id, создаем ссылку
-            # Пробуем использовать формат https://t.me/user{id} или просто ID
-            # Некоторые системы Planfix могут принимать просто ID как строку
-            # Попробуем сначала формат с user{id}, если не сработает - можно будет изменить
-            data["telegram"] = f"https://t.me/user{telegram_id}"
-            logger.info(f"Setting telegram field to user link (no username): {data['telegram']}")
+        # Если нет username, не заполняем поле telegram - только telegramId
+        # Формат https://t.me/user{id} не работает для пользователей без username
         
         if telegram_id:
             # telegramId должен быть строкой согласно swagger.json
