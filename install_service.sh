@@ -44,13 +44,22 @@ chown "$PROJECT_USER:$PROJECT_GROUP" "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 echo "✅ Создана директория для логов: $LOG_DIR"
 
-# Определяем путь к Python в venv
-VENV_PYTHON="$PROJECT_DIR/venv/bin/python3"
-if [ ! -f "$VENV_PYTHON" ]; then
-    echo "❌ Python в venv не найден: $VENV_PYTHON"
-    echo "   Убедитесь, что виртуальное окружение создано и активировано"
+# Определяем путь к Python в venv (пробуем оба варианта: venv и .venv)
+VENV_PYTHON=""
+if [ -f "$PROJECT_DIR/venv/bin/python3" ]; then
+    VENV_PYTHON="$PROJECT_DIR/venv/bin/python3"
+elif [ -f "$PROJECT_DIR/.venv/bin/python3" ]; then
+    VENV_PYTHON="$PROJECT_DIR/.venv/bin/python3"
+else
+    echo "❌ Python в venv не найден"
+    echo "   Проверялись пути:"
+    echo "   - $PROJECT_DIR/venv/bin/python3"
+    echo "   - $PROJECT_DIR/.venv/bin/python3"
+    echo "   Убедитесь, что виртуальное окружение создано"
     exit 1
 fi
+
+echo "✅ Найден Python: $VENV_PYTHON"
 
 # Создаем временный service файл с правильными путями
 SERVICE_FILE="/tmp/telegram-planfix-bot.service"
@@ -64,7 +73,7 @@ Type=simple
 User=$PROJECT_USER
 Group=$PROJECT_GROUP
 WorkingDirectory=$PROJECT_DIR
-Environment="PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$(dirname $VENV_PYTHON):/usr/local/bin:/usr/bin:/bin"
 Environment="SYSTEMD_SERVICE=1"
 Environment="LOG_DIR=$LOG_DIR"
 ExecStart=$VENV_PYTHON $PROJECT_DIR/run.py --mode both
