@@ -825,12 +825,19 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
             # Передаем полное имя, чтобы метод create_contact сам правильно разделил ФИО
             # Это избежит конфликтов с логикой разделения внутри метода
             logger.info(f"Creating Planfix contact for executor {callback_query.from_user.id} with name: {user_data['full_name']}")
+            # Получаем Telegram username если есть
+            telegram_username = callback_query.from_user.username
+            telegram_id = str(callback_query.from_user.id) if callback_query.from_user.id else None
+            
             contact_response = await planfix_client.create_contact(
                 name=user_data['full_name'],  # Передаем полное имя, метод сам разделит
                 phone=user_data['phone_number'],
                 email=user_data.get('email'),
                 group_id=SUPPORT_CONTACT_GROUP_ID,  # Группа "Поддержка"
-                template_id=SUPPORT_CONTACT_TEMPLATE_ID  # Template ID 1
+                template_id=SUPPORT_CONTACT_TEMPLATE_ID,  # Template ID 1
+                position=user_data.get('position_role'),  # Должность исполнителя
+                telegram=telegram_username,  # Telegram username (если есть)
+                telegram_id=telegram_id  # Telegram ID
             )
             
             if contact_response and contact_response.get('result') == 'success':
@@ -943,8 +950,17 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
             task_response = await planfix_client.create_task(**create_task_kwargs)
             
             if task_response and task_response.get('result') == 'success':
-                task_id = task_response.get('id') or task_response.get('task', {}).get('id')
-                logger.info(f"Created Planfix task {task_id} for executor registration {callback_query.from_user.id}")
+                # В Planfix есть два типа ID: id (внутренний) и generalId (общий)
+                # В webhook приходит id, поэтому сохраняем id, а не generalId
+                task_data = task_response.get('task', {}) if 'task' in task_response else task_response
+                task_id = task_data.get('id') or task_response.get('id')
+                
+                # Если task_id не найден, пробуем generalId (но это не то, что приходит в webhook)
+                if not task_id:
+                    task_id = task_data.get('generalId') or task_response.get('generalId')
+                    logger.warning(f"Using generalId {task_id} instead of id for task")
+                
+                logger.info(f"Created Planfix task id={task_id} (response keys: {list(task_response.keys())}, task keys: {list(task_data.keys()) if isinstance(task_data, dict) else 'N/A'}) for executor registration {callback_query.from_user.id}")
                 
                 # Сохраняем ID задачи в профиле исполнителя (обновляем существующий профиль)
                 await db_manager.update_executor_profile(

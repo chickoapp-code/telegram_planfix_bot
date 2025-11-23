@@ -561,7 +561,7 @@ class PlanfixAPIClient:
         params = {"fields": fields}
         return await self._request("GET", endpoint, params=params)
 
-    async def create_contact(self, name, phone=None, email=None, template_id=None, custom_field_data=None, lastname=None, group_id=None):
+    async def create_contact(self, name, phone=None, email=None, template_id=None, custom_field_data=None, lastname=None, group_id=None, position=None, telegram=None, telegram_id=None):
         """Создает новый контакт в Planfix."""
         endpoint = "/contact/"
         
@@ -600,6 +600,26 @@ class PlanfixAPIClient:
         # Добавляем email если есть
         if email:
             data["email"] = email
+        
+        # Добавляем должность если указана
+        # Согласно swagger.json, поле position - это строка
+        if position:
+            data["position"] = position
+        
+        # Добавляем Telegram если указан
+        # Согласно swagger.json, есть два поля: telegram (URL или username) и telegramId (ID)
+        if telegram:
+            # Если telegram начинается с @, убираем его
+            telegram_clean = telegram.lstrip('@')
+            # Если не начинается с https://, добавляем префикс
+            if not telegram_clean.startswith('https://') and not telegram_clean.startswith('http://'):
+                data["telegram"] = f"https://t.me/{telegram_clean}"
+            else:
+                data["telegram"] = telegram_clean
+        
+        if telegram_id:
+            # telegramId должен быть строкой согласно swagger.json
+            data["telegramId"] = str(telegram_id)
             
         # Добавляем кастомные поля если есть
         if custom_field_data:

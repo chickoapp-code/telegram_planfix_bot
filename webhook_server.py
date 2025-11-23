@@ -271,12 +271,49 @@ class PlanfixWebhookHandler:
             # ВАЖНО: Проверяем задачи регистрации ДО обработки изменения статуса,
             # чтобы обработать случаи, когда задача уже была завершена
             # Проверяем, это задача регистрации исполнителя
+            # ВАЖНО: task_id из webhook - это id (внутренний), а не generalId
+            # Но в базе может быть сохранен как id, так и generalId
+            # Поэтому ищем по обоим вариантам
             with self.db_manager.get_db() as db:
                 from database import ExecutorProfile
+                # Сначала ищем по точному совпадению
                 executor = db.query(ExecutorProfile).filter(
                     ExecutorProfile.registration_task_id == task_id,
                     ExecutorProfile.profile_status == "ожидает подтверждения"
                 ).first()
+                
+                # Если не нашли, пробуем найти по generalId (если в базе сохранен generalId)
+                # Для этого нужно получить generalId из задачи
+                if not executor:
+                    logger.debug(f"Task {task_id} not found by id, trying to get generalId")
+                    try:
+                        task_response = await planfix_client.get_task_by_id(
+                            task_id,
+                            fields="id,generalId"
+                        )
+                        if task_response and task_response.get('result') == 'success':
+                            task_data = task_response.get('task', {})
+                            general_id = task_data.get('generalId')
+                            if general_id:
+                                logger.info(f"Task {task_id} has generalId={general_id}, searching by generalId")
+                                executor = db.query(ExecutorProfile).filter(
+                                    ExecutorProfile.registration_task_id == general_id,
+                                    ExecutorProfile.profile_status == "ожидает подтверждения"
+                                ).first()
+                                if executor:
+                                    logger.info(f"Found executor by generalId={general_id}, updating registration_task_id to id={task_id}")
+                                    # Обновляем registration_task_id на правильный id для будущих поисков
+                                    executor.registration_task_id = task_id
+                                    db.commit()
+                            else:
+                                logger.warning(f"Task {task_id} has no generalId in response")
+                        else:
+                            logger.warning(f"Failed to get task {task_id} to find generalId: {task_response}")
+                    except Exception as e:
+                        logger.warning(f"Error getting task {task_id} to find generalId: {e}", exc_info=True)
+                
+                if not executor:
+                    logger.debug(f"No executor found for registration task {task_id}")
                 
                 if executor:
                     status_name = task.get('status', {}).get('name', 'Unknown')
