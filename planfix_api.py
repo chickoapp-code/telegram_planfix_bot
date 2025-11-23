@@ -607,9 +607,29 @@ class PlanfixAPIClient:
             
         # Добавляем шаблон если есть
         if template_id:
-            data["template"] = {"id": template_id}
+            data["template"] = {"id": int(template_id)}
+        
+        # Пробуем создать контакт
+        try:
+            return await self._request("POST", endpoint, data=data)
+        except Exception as e:
+            # Если ошибка 400 и есть группа или template, пробуем без них
+            error_str = str(e).lower()
+            is_bad_request = "400" in error_str or "bad request" in error_str
             
-        return await self._request("POST", endpoint, data=data)
+            if is_bad_request and (group_id or template_id):
+                logger.warning(f"Failed to create contact with group/template, trying without them: {e}")
+                # Создаем копию данных без группы и template
+                data_fallback = data.copy()
+                data_fallback.pop("group", None)
+                data_fallback.pop("template", None)
+                try:
+                    return await self._request("POST", endpoint, data=data_fallback)
+                except Exception as fallback_error:
+                    logger.error(f"Failed to create contact even without group/template: {fallback_error}")
+                    raise
+            else:
+                raise
 
     # ============================================================================
     # TASKS

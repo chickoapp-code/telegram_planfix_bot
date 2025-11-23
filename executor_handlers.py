@@ -819,22 +819,18 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
         # Создаем контакт исполнителя в Planfix
         planfix_contact_id = None
         try:
-            # Разделяем ФИО на имя и фамилию
-            name_parts = user_data['full_name'].strip().split()
-            if len(name_parts) >= 2:
-                lastname = name_parts[0]
-                name = " ".join(name_parts[1:])
-            else:
-                name = user_data['full_name']
-                lastname = user_data['full_name']
+            # Создаем контакт исполнителя в группе "Поддержка" с template_id
+            from config import SUPPORT_CONTACT_GROUP_ID, SUPPORT_CONTACT_TEMPLATE_ID
             
-            # Создаем контакт исполнителя (без группы, так как исполнители не привязаны к конкретной концепции)
+            # Передаем полное имя, чтобы метод create_contact сам правильно разделил ФИО
+            # Это избежит конфликтов с логикой разделения внутри метода
+            logger.info(f"Creating Planfix contact for executor {callback_query.from_user.id} with name: {user_data['full_name']}")
             contact_response = await planfix_client.create_contact(
-                name=name,
-                lastname=lastname,
+                name=user_data['full_name'],  # Передаем полное имя, метод сам разделит
                 phone=user_data['phone_number'],
                 email=user_data.get('email'),
-                group_id=None  # Исполнители не привязаны к группе концепции
+                group_id=SUPPORT_CONTACT_GROUP_ID,  # Группа "Поддержка"
+                template_id=SUPPORT_CONTACT_TEMPLATE_ID  # Template ID 1
             )
             
             if contact_response and contact_response.get('result') == 'success':
