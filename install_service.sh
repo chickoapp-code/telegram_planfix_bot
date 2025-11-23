@@ -45,21 +45,29 @@ chmod 755 "$LOG_DIR"
 echo "✅ Создана директория для логов: $LOG_DIR"
 
 # Определяем путь к Python в venv (пробуем оба варианта: venv и .venv)
+# Проверяем от имени пользователя проекта, чтобы избежать проблем с правами доступа
 VENV_PYTHON=""
-if [ -f "$PROJECT_DIR/venv/bin/python3" ]; then
+if sudo -u "$PROJECT_USER" test -f "$PROJECT_DIR/venv/bin/python3"; then
     VENV_PYTHON="$PROJECT_DIR/venv/bin/python3"
-elif [ -f "$PROJECT_DIR/.venv/bin/python3" ]; then
+    echo "✅ Найден Python в venv: $VENV_PYTHON"
+elif sudo -u "$PROJECT_USER" test -f "$PROJECT_DIR/.venv/bin/python3"; then
     VENV_PYTHON="$PROJECT_DIR/.venv/bin/python3"
+    echo "✅ Найден Python в .venv: $VENV_PYTHON"
 else
     echo "❌ Python в venv не найден"
     echo "   Проверялись пути:"
     echo "   - $PROJECT_DIR/venv/bin/python3"
     echo "   - $PROJECT_DIR/.venv/bin/python3"
-    echo "   Убедитесь, что виртуальное окружение создано"
+    echo ""
+    echo "   Отладочная информация:"
+    sudo -u "$PROJECT_USER" ls -la "$PROJECT_DIR" | grep -E "(venv|\.venv)" || echo "   (директории venv не найдены)"
+    echo ""
+    echo "   Убедитесь, что виртуальное окружение создано:"
+    echo "   python3 -m venv .venv"
+    echo "   source .venv/bin/activate"
+    echo "   pip install -r requirements.txt"
     exit 1
 fi
-
-echo "✅ Найден Python: $VENV_PYTHON"
 
 # Создаем временный service файл с правильными путями
 SERVICE_FILE="/tmp/telegram-planfix-bot.service"
