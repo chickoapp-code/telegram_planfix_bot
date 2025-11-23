@@ -193,3 +193,150 @@ def get_task_action_keyboard(task_id: int, action_type: str) -> InlineKeyboardMa
     buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action")])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================================
+# АДМИН-КЛАВИАТУРЫ
+# ============================================================================
+
+def get_admin_main_menu_keyboard():
+    """Главное меню администратора."""
+    buttons = [
+        [KeyboardButton(text="👥 Управление пользователями")],
+        [KeyboardButton(text="👷 Управление исполнителями")],
+        [KeyboardButton(text="📊 Статистика")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+
+def get_admin_users_menu_keyboard():
+    """Меню управления пользователями."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Список пользователей", callback_data="admin_list_users")],
+            [InlineKeyboardButton(text="🔍 Найти пользователя", callback_data="admin_search_user")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back_to_main")]
+        ]
+    )
+
+
+def get_admin_executors_menu_keyboard():
+    """Меню управления исполнителями."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Список исполнителей", callback_data="admin_list_executors")],
+            [InlineKeyboardButton(text="🔍 Найти исполнителя", callback_data="admin_search_executor")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back_to_main")]
+        ]
+    )
+
+
+def get_admin_profile_actions_keyboard(profile_type: str, profile_id: int):
+    """Клавиатура действий с профилем (пользователь/исполнитель)."""
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"admin_edit_{profile_type}:{profile_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_delete_{profile_type}:{profile_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"admin_list_{profile_type}s")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_admin_edit_user_keyboard(user_id: int):
+    """Клавиатура редактирования пользователя."""
+    buttons = [
+        [InlineKeyboardButton(text="✏️ ФИО", callback_data=f"admin_edit_user_field:{user_id}:full_name")],
+        [InlineKeyboardButton(text="✏️ Телефон", callback_data=f"admin_edit_user_field:{user_id}:phone")],
+        [InlineKeyboardButton(text="✏️ Email", callback_data=f"admin_edit_user_field:{user_id}:email")],
+        [InlineKeyboardButton(text="✏️ Концепция", callback_data=f"admin_edit_user_field:{user_id}:franchise")],
+        [InlineKeyboardButton(text="✏️ Ресторан", callback_data=f"admin_edit_user_field:{user_id}:restaurant")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_view_user:{user_id}")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_admin_edit_executor_keyboard(executor_id: int):
+    """Клавиатура редактирования исполнителя."""
+    buttons = [
+        [InlineKeyboardButton(text="✏️ ФИО", callback_data=f"admin_edit_exec_field:{executor_id}:full_name")],
+        [InlineKeyboardButton(text="✏️ Телефон", callback_data=f"admin_edit_exec_field:{executor_id}:phone")],
+        [InlineKeyboardButton(text="✏️ Email", callback_data=f"admin_edit_exec_field:{executor_id}:email")],
+        [InlineKeyboardButton(text="✏️ Должность", callback_data=f"admin_edit_exec_field:{executor_id}:position")],
+        [InlineKeyboardButton(text="✏️ Концепции", callback_data=f"admin_edit_exec_field:{executor_id}:concepts")],
+        [InlineKeyboardButton(text="✏️ Рестораны", callback_data=f"admin_edit_exec_field:{executor_id}:restaurants")],
+        [InlineKeyboardButton(text="✏️ Направление", callback_data=f"admin_edit_exec_field:{executor_id}:direction")],
+        [InlineKeyboardButton(text="✏️ Planfix Contact ID", callback_data=f"admin_edit_exec_field:{executor_id}:planfix_id")],
+        [InlineKeyboardButton(text="✏️ Статус", callback_data=f"admin_edit_exec_field:{executor_id}:status")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_view_executor:{executor_id}")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_admin_delete_confirmation_keyboard(profile_type: str, profile_id: int):
+    """Клавиатура подтверждения удаления."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_confirm_delete_{profile_type}:{profile_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin_view_{profile_type}:{profile_id}")
+            ]
+        ]
+    )
+
+
+def create_users_list_keyboard(users: list, page: int = 0, per_page: int = 10):
+    """Создает клавиатуру со списком пользователей с пагинацией."""
+    def _short(text: str) -> str:
+        return text if len(text) <= 64 else (text[:61] + "...")
+    
+    buttons = []
+    start_idx = page * per_page
+    end_idx = start_idx + per_page
+    
+    for user in users[start_idx:end_idx]:
+        user_id = user.telegram_id
+        name = user.full_name or f"ID: {user_id}"
+        button_text = _short(f"{name} (ID: {user_id})")
+        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"admin_view_user:{user_id}")])
+    
+    # Кнопки пагинации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_list_users_page:{page-1}"))
+    if end_idx < len(users):
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"admin_list_users_page:{page+1}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="admin_back_to_main")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_executors_list_keyboard(executors: list, page: int = 0, per_page: int = 10):
+    """Создает клавиатуру со списком исполнителей с пагинацией."""
+    def _short(text: str) -> str:
+        return text if len(text) <= 64 else (text[:61] + "...")
+    
+    buttons = []
+    start_idx = page * per_page
+    end_idx = start_idx + per_page
+    
+    for executor in executors[start_idx:end_idx]:
+        executor_id = executor.telegram_id
+        name = executor.full_name or f"ID: {executor_id}"
+        status = executor.profile_status or "неизвестно"
+        button_text = _short(f"{name} ({status}) - ID: {executor_id}")
+        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"admin_view_executor:{executor_id}")])
+    
+    # Кнопки пагинации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_list_executors_page:{page-1}"))
+    if end_idx < len(executors):
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"admin_list_executors_page:{page+1}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="admin_back_to_main")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

@@ -141,7 +141,6 @@ def delete_user(telegram_id: int, force: bool = False) -> bool:
             ).all()
             for assignment in assignments:
                 db.delete(assignment)
-                deleted_count += 1
             if assignments:
                 db.commit()
                 print(f"✅ Удалено назначений задач: {len(assignments)}")

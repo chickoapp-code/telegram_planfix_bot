@@ -32,6 +32,7 @@ from aiohttp import web
 from config import BOT_TOKEN
 from config.settings import settings
 from database import init_db
+from admin_handlers import router as admin_router
 from executor_handlers import router as executor_router
 from logging_config import setup_logging
 from planfix_client import planfix_client
@@ -72,6 +73,8 @@ def create_dispatcher() -> Dispatcher:
     # Регистрация обработчиков
     # ВАЖНО: executor_router регистрируется первым, чтобы обработчики кнопок меню исполнителей
     # имели приоритет над общими обработчиками в user_router
+    # admin_router регистрируется первым для приоритета админ-команд
+    dp.include_router(admin_router)
     dp.include_router(executor_router)
     dp.include_router(user_router)
     

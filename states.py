@@ -88,3 +88,15 @@ class ExecutorProfileEdit(StatesGroup):
     editing_concepts = State()
     editing_restaurants = State()
     editing_direction = State()
+
+
+class AdminManagement(StatesGroup):
+    """Состояния админ-меню."""
+    main_menu = State()
+    viewing_user = State()
+    viewing_executor = State()
+    editing_user_field = State()
+    editing_executor_field = State()
+    searching_user = State()
+    searching_executor = State()
+    confirming_delete = State()
