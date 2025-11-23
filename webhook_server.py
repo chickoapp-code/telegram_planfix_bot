@@ -509,6 +509,53 @@ async def webhook_handler(request):
                         if lines and lines[-1].strip() == '```':
                             lines = lines[:-1]
                         body_text = '\n'.join(lines)
+                    
+                    # Исправляем проблему с массивами, вставленными как строки
+                    # Planfix может вставлять "[]" или "["value"]" как строки вместо массивов
+                    import re
+                    # Заменяем строки вида "[]" на пустые массивы []
+                    body_text = re.sub(r':\s*"\[\]"', ': []', body_text)
+                    # Заменяем строки вида "["value"]" на массивы ["value"]
+                    # Используем более точное регулярное выражение для обработки вложенных кавычек и массивов
+                    def fix_array_strings(match):
+                        value = match.group(1)
+                        # Если это валидный JSON-массив, заменяем строку на массив
+                        try:
+                            # Проверяем, что это валидный JSON-массив
+                            parsed = json.loads(value)
+                            if isinstance(parsed, list):
+                                return f': {value}'
+                        except:
+                            pass
+                        return match.group(0)  # Оставляем как есть, если не валидный JSON
+                    
+                    # Ищем строки вида ": "["value"]" или ": "[]""
+                    # Обрабатываем массивы с кавычками внутри, например: "["Робот Бендер"]"
+                    # Используем более сложное регулярное выражение для обработки вложенных кавычек
+                    # Сначала обрабатываем простые случаи
+                    body_text = re.sub(r':\s*"(\[[^\]]*\])"', fix_array_strings, body_text)
+                    
+                    # Затем обрабатываем более сложные случаи с экранированными кавычками
+                    # Ищем строки, которые начинаются с "[" и заканчиваются на "]"
+                    # и содержат внутри JSON-массив
+                    def fix_complex_array_strings(match):
+                        full_match = match.group(0)
+                        # Извлекаем содержимое между кавычками
+                        content = match.group(1)
+                        try:
+                            # Пытаемся распарсить как JSON-массив
+                            parsed = json.loads(content)
+                            if isinstance(parsed, list):
+                                # Заменяем строку на массив
+                                return f': {content}'
+                        except:
+                            pass
+                        return full_match
+                    
+                    # Ищем строки вида ": "["value"]" с учетом экранированных кавычек
+                    pattern = r':\s*"(\[(?:[^"\\]|\\.|"(?:[^"\\]|\\.)*")*\])"'
+                    body_text = re.sub(pattern, fix_complex_array_strings, body_text)
+                    
                     data = json.loads(body_text)
                 elif 'application/x-www-form-urlencoded' in content_type:
                     # Парсим form-urlencoded данные
