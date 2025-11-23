@@ -34,6 +34,64 @@ class PlanfixWebhookHandler:
         self._task_status_cache = {}  # {task_id: status_id}
         # Кэш для предотвращения дубликатов событий
         self._processed_events = set()  # {(event_type, task_id, timestamp)}
+    
+    async def check_pending_registration_tasks(self):
+        """Проверяет все незавершенные задачи регистрации при старте."""
+        try:
+            logger.info("Checking pending registration tasks on startup...")
+            with self.db_manager.get_db() as db:
+                from database import ExecutorProfile
+                executors = db.query(ExecutorProfile).filter(
+                    ExecutorProfile.registration_task_id.isnot(None),
+                    ExecutorProfile.profile_status == "ожидает подтверждения"
+                ).all()
+                
+                if not executors:
+                    logger.info("No pending registration tasks found")
+                    return
+                
+                logger.info(f"Found {len(executors)} pending registration tasks, checking their status...")
+                
+                for executor in executors:
+                    task_id = executor.registration_task_id
+                    if not task_id:
+                        continue
+                    
+                    try:
+                        # Получаем статус задачи из Planfix
+                        task_response = await planfix_client.get_task_by_id(
+                            task_id,
+                            fields="id,status"
+                        )
+                        
+                        if not task_response or task_response.get('result') != 'success':
+                            logger.warning(f"Failed to get registration task {task_id} for executor {executor.telegram_id}")
+                            continue
+                        
+                        task = task_response.get('task', {})
+                        status_raw = task.get('status', {})
+                        status_id = self._normalize_status_id(status_raw.get('id'))
+                        status_name = status_raw.get('name', 'Unknown')
+                        
+                        logger.info(f"Registration task {task_id} for executor {executor.telegram_id}: status_id={status_id}, status_name='{status_name}'")
+                        
+                        if status_id:
+                            if status_in(status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
+                                logger.info(f"Registration task {task_id} is already completed, approving executor {executor.telegram_id}")
+                                await self._approve_executor(executor.telegram_id, task_id)
+                            elif status_in(status_id, (StatusKey.CANCELLED, StatusKey.REJECTED)):
+                                logger.info(f"Registration task {task_id} is cancelled/rejected, rejecting executor {executor.telegram_id}")
+                                await self._reject_executor(executor.telegram_id, task_id)
+                            else:
+                                logger.debug(f"Registration task {task_id} status {status_id} ('{status_name}') is not a terminal status")
+                        else:
+                            logger.warning(f"Could not normalize status_id for registration task {task_id}, status_raw: {status_raw}")
+                    except Exception as e:
+                        logger.error(f"Error checking registration task {task_id} for executor {executor.telegram_id}: {e}", exc_info=True)
+                        continue
+                        
+        except Exception as e:
+            logger.error(f"Error checking pending registration tasks: {e}", exc_info=True)
         
     def _normalize_status_id(self, status_raw) -> Optional[int]:
         """Нормализует ID статуса из webhook данных."""
@@ -134,6 +192,30 @@ class PlanfixWebhookHandler:
             
             logger.info(f"📝 Task {task_id} updated, status: {old_status_id} -> {new_status_id}")
             
+            # ВАЖНО: Проверяем задачи регистрации ДО обработки изменения статуса,
+            # чтобы обработать случаи, когда задача уже была завершена
+            # Проверяем, это задача регистрации исполнителя
+            with self.db_manager.get_db() as db:
+                from database import ExecutorProfile
+                executor = db.query(ExecutorProfile).filter(
+                    ExecutorProfile.registration_task_id == task_id,
+                    ExecutorProfile.profile_status == "ожидает подтверждения"
+                ).first()
+                
+                if executor:
+                    status_name = task.get('status', {}).get('name', 'Unknown')
+                    logger.info(f"Found registration task {task_id} for executor {executor.telegram_id}, status_id={new_status_id}, status_name='{status_name}'")
+                    if new_status_id and status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
+                        logger.info(f"Registration task {task_id} is completed, approving executor {executor.telegram_id}")
+                        await self._approve_executor(executor.telegram_id, task_id)
+                    elif new_status_id and status_in(new_status_id, (StatusKey.CANCELLED, StatusKey.REJECTED)):
+                        logger.info(f"Registration task {task_id} is cancelled/rejected, rejecting executor {executor.telegram_id}")
+                        await self._reject_executor(executor.telegram_id, task_id)
+                    elif new_status_id:
+                        logger.debug(f"Registration task {task_id} status {new_status_id} ('{status_name}') is not a terminal status for executor approval")
+                    else:
+                        logger.warning(f"Could not determine status for registration task {task_id}, status data: {task.get('status', {})}")
+            
             # Обрабатываем изменение статуса
             if new_status_id != old_status_id:
                 # Обновляем кэш статуса
@@ -160,19 +242,6 @@ class PlanfixWebhookHandler:
             # Обрабатываем назначения исполнителей
             if assignee_users:
                 await self._handle_task_assignments(task_id, assignee_users)
-            
-            # Проверяем, это задача регистрации исполнителя
-            with self.db_manager.get_db() as db:
-                from database import ExecutorProfile
-                executor = db.query(ExecutorProfile).filter(
-                    ExecutorProfile.registration_task_id == task_id
-                ).first()
-                
-                if executor:
-                    if status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
-                        await self._approve_executor(executor.telegram_id, task_id)
-                    elif status_in(new_status_id, (StatusKey.CANCELLED, StatusKey.REJECTED)):
-                        await self._reject_executor(executor.telegram_id, task_id)
                         
         except Exception as e:
             logger.error(f"Error handling task updated: {e}", exc_info=True)
@@ -433,7 +502,14 @@ async def health_check(request):
 def create_webhook_app(bot: Bot) -> web.Application:
     """Создает aiohttp приложение для webhook."""
     app = web.Application()
-    app['webhook_handler'] = PlanfixWebhookHandler(bot)
+    handler = PlanfixWebhookHandler(bot)
+    app['webhook_handler'] = handler
+    
+    # Проверяем незавершенные задачи регистрации при старте
+    async def on_startup(app):
+        await handler.check_pending_registration_tasks()
+    
+    app.on_startup.append(on_startup)
     
     app.router.add_post('/planfix/webhook', webhook_handler)
     app.router.add_get('/health', health_check)
