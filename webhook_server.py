@@ -175,11 +175,19 @@ class PlanfixWebhookHandler:
         """Обработка создания новой задачи."""
         try:
             task = data.get('task', {})
-            task_id = task.get('id')
-            project_id = task.get('project', {}).get('id')
+            task_id_raw = task.get('id')
+            project_id_raw = task.get('project', {}).get('id')
             
-            if not task_id or not project_id:
+            if not task_id_raw or not project_id_raw:
                 logger.warning(f"Incomplete task data in webhook: {data}")
+                return
+            
+            # Преобразуем task_id и project_id в int, если это строки
+            try:
+                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
+                project_id = int(project_id_raw) if isinstance(project_id_raw, str) else project_id_raw
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid task_id or project_id format: task_id={task_id_raw}, project_id={project_id_raw}")
                 return
             
             # Фильтруем только релевантные задачи
@@ -206,10 +214,17 @@ class PlanfixWebhookHandler:
             await ensure_status_registry_loaded()
             
             task = data.get('task', {})
-            task_id = task.get('id')
+            task_id_raw = task.get('id')
             
-            if not task_id:
+            if not task_id_raw:
                 logger.warning(f"Incomplete task data in webhook: {data}")
+                return
+            
+            # Преобразуем task_id в int, если это строка
+            try:
+                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid task_id format: {task_id_raw}")
                 return
             
             # Фильтруем только релевантные задачи
@@ -301,11 +316,18 @@ class PlanfixWebhookHandler:
         """Обработка добавления комментария."""
         try:
             task = data.get('task', {})
-            task_id = task.get('id')
+            task_id_raw = task.get('id')
             comment = data.get('comment', {})
             
-            if not task_id:
+            if not task_id_raw:
                 logger.warning(f"Incomplete comment data in webhook: {data}")
+                return
+            
+            # Преобразуем task_id в int, если это строка
+            try:
+                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid task_id format: {task_id_raw}")
                 return
             
             # Фильтруем комментарии от бота

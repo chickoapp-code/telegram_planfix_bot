@@ -643,7 +643,7 @@ class PlanfixAPIClient:
 
     async def create_task(self, name, description, template_id=None, project_id=None, counterparty_id=None,
                           custom_field_data=None, files=None, assignee_users=None, assignee_groups=None,
-                          status_id=None, tags=None):
+                          status_id=None, tags=None, process_id=None):
         """Создает новую задачу (заявку) в Planfix."""
         endpoint = "/task/"
         # Санитизируем текстовые поля (убираем emoji/вне BMP)
@@ -664,6 +664,9 @@ class PlanfixAPIClient:
             # В примерах swagger counterparty.id передается как число, хотя схема указывает string
             # Пробуем число, так как в примерах используется число
             task_data["counterparty"] = {"id": int(counterparty_id)}
+        if process_id:
+            # Устанавливаем процесс для задачи
+            task_data["process"] = {"id": int(process_id)}
         if custom_field_data:
             if isinstance(custom_field_data, list) and len(custom_field_data) > 0:
                 task_data["customFieldData"] = custom_field_data

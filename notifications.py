@@ -289,7 +289,7 @@ class NotificationService:
             # Получаем полные данные задачи включая кастомные поля для поиска контрагента
             task_response = await self.planfix_client.get_task_by_id(
                 task_id,
-                fields="id,name,counterparty.id,customFieldData,files"
+                fields="id,name,counterparty,customFieldData,files"
             )
             if not task_response or task_response.get('result') != 'success':
                 logger.warning(f"Failed to get task {task_id} for comment notification")

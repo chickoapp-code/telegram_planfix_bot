@@ -881,7 +881,22 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 f"После выполнения действия бот автоматически обновит статус исполнителя."
             )
             
-            # Создаем задачу в Planfix
+            # Получаем начальный статус из процесса для быстрого получения подтверждения
+            initial_status_id = None
+            if PLANFIX_TASK_PROCESS_ID:
+                try:
+                    # Убеждаемся, что status registry загружен
+                    await ensure_status_registry_loaded()
+                    # Получаем ID статуса "Новая" из процесса
+                    initial_status_id = require_status_id(StatusKey.NEW, required=False)
+                    if initial_status_id:
+                        logger.info(f"Using initial status {initial_status_id} (NEW) from process {PLANFIX_TASK_PROCESS_ID}")
+                    else:
+                        logger.warning(f"Could not get NEW status ID from process {PLANFIX_TASK_PROCESS_ID}")
+                except Exception as e:
+                    logger.warning(f"Error getting initial status from process: {e}")
+            
+            # Создаем задачу в Planfix с процессом и начальным статусом
             task_response = await planfix_client.create_task(
                 name=f"Регистрация исполнителя: {user_data['full_name']}",
                 description=task_description,
@@ -890,7 +905,9 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 counterparty_id=None,  # Без контрагента
                 custom_field_data=None,
                 assignee_users=[2],
-                files=None
+                files=None,
+                process_id=PLANFIX_TASK_PROCESS_ID if PLANFIX_TASK_PROCESS_ID else None,  # Используем процесс для быстрого получения подтверждения
+                status_id=initial_status_id  # Устанавливаем начальный статус из процесса
             )
             
             if task_response and task_response.get('result') == 'success':
