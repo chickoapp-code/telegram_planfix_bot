@@ -134,8 +134,6 @@ def delete_user(telegram_id: int, force: bool = False) -> bool:
                 return False
         
         # Удаляем связанные данные
-        deleted_count = 0
-        
         if executor:
             # Удаляем назначения задач
             assignments = db.query(TaskAssignment).filter(
