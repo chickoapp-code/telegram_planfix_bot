@@ -583,29 +583,10 @@ async def webhook_handler(request):
                     # Сначала обрабатываем простые случаи
                     body_text = re.sub(r':\s*"(\[[^\]]*\])"', fix_array_strings, body_text)
                     
-                    # 3. Исправляем вложенные JSON-объекты в строках (например, comment.id)
+                    # 3. Исправляем вложенные JSON-объекты в строках (например, comment.json)
                     # Planfix может вставлять JSON-объекты как строки с неэкранированными кавычками
                     # Ищем паттерн "key": "{...}" где внутри может быть JSON-объект
                     def fix_nested_json_in_strings(text):
-                        # Используем регулярное выражение для поиска паттерна "key": "{...}"
-                        # Ищем строки вида "id": "{...}" где внутри JSON-объект
-                        import re
-                        pattern = r'"([^"]+)":\s*"(\{.*?\})"'
-                        
-                        def replace_nested_json(match):
-                            key = match.group(1)
-                            json_str = match.group(2)
-                            try:
-                                # Пытаемся распарсить как JSON
-                                parsed = json.loads(json_str)
-                                # Если успешно, заменяем строку на объект
-                                return f'"{key}": {json.dumps(parsed, ensure_ascii=False)}'
-                            except:
-                                # Если не удалось, оставляем как есть
-                                return match.group(0)
-                        
-                        # Применяем замену, но нужно найти правильный конец объекта
-                        # Используем более сложный подход с подсчетом скобок
                         result = []
                         i = 0
                         while i < len(text):
@@ -617,32 +598,52 @@ async def webhook_handler(request):
                                     key = text[key_start+1:i]
                                     # Пытаемся найти конец JSON-объекта
                                     brace_count = 0
+                                    bracket_count = 0  # Для массивов
                                     json_start = i + 2  # После ': "'
                                     j = json_start
                                     found_end = False
+                                    in_string = False
+                                    escape_next = False
+                                    
                                     while j < len(text):
-                                        # Учитываем экранированные кавычки и обратные слеши
-                                        if text[j] == '\\' and j + 1 < len(text):
-                                            j += 2  # Пропускаем экранированный символ
+                                        if escape_next:
+                                            escape_next = False
+                                            j += 1
                                             continue
-                                        if text[j] == '{':
-                                            brace_count += 1
-                                        elif text[j] == '}':
-                                            brace_count -= 1
-                                            if brace_count == 0:
-                                                # Нашли конец объекта
-                                                json_str = text[json_start:j+1]
-                                                try:
-                                                    # Пытаемся распарсить как JSON
-                                                    parsed = json.loads(json_str)
-                                                    # Если успешно, заменяем строку на объект
-                                                    result.append(f'"{key}": {json.dumps(parsed, ensure_ascii=False)}')
-                                                    i = j + 2  # Пропускаем '}"'
-                                                    found_end = True
-                                                    break
-                                                except Exception as e:
-                                                    # Если не удалось распарсить, продолжаем поиск
-                                                    pass
+                                        
+                                        if text[j] == '\\':
+                                            escape_next = True
+                                            j += 1
+                                            continue
+                                        
+                                        if text[j] == '"' and not escape_next:
+                                            in_string = not in_string
+                                            j += 1
+                                            continue
+                                        
+                                        if not in_string:
+                                            if text[j] == '{':
+                                                brace_count += 1
+                                            elif text[j] == '}':
+                                                brace_count -= 1
+                                                if brace_count == 0 and bracket_count == 0:
+                                                    # Нашли конец объекта
+                                                    json_str = text[json_start:j+1]
+                                                    try:
+                                                        # Пытаемся распарсить как JSON
+                                                        parsed = json.loads(json_str)
+                                                        # Если успешно, заменяем строку на объект
+                                                        result.append(f'"{key}": {json.dumps(parsed, ensure_ascii=False)}')
+                                                        i = j + 2  # Пропускаем '}"'
+                                                        found_end = True
+                                                        break
+                                                    except Exception as e:
+                                                        # Если не удалось распарсить, продолжаем поиск
+                                                        pass
+                                            elif text[j] == '[':
+                                                bracket_count += 1
+                                            elif text[j] == ']':
+                                                bracket_count -= 1
                                         j += 1
                                     if found_end:
                                         continue
