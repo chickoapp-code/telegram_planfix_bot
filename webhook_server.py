@@ -483,11 +483,71 @@ class PlanfixWebhookHandler:
 async def webhook_handler(request):
     """Обработчик входящих webhook от Planfix."""
     try:
-        data = await request.json()
-        logger.info(f"Received webhook: {json.dumps(data, ensure_ascii=False, indent=2)}")
+        # Получаем сырое тело запроса для диагностики
+        raw_body = await request.read()
+        content_type = request.headers.get('Content-Type', '').lower()
+        
+        # Логируем информацию о запросе
+        logger.info(f"Received webhook: method={request.method}, content_type={content_type}, body_length={len(raw_body)}")
+        
+        # Пытаемся распарсить данные в зависимости от Content-Type
+        data = {}
+        
+        if raw_body:
+            try:
+                if 'application/json' in content_type:
+                    # Парсим JSON из сырого тела
+                    data = json.loads(raw_body.decode('utf-8'))
+                elif 'application/x-www-form-urlencoded' in content_type:
+                    # Парсим form-urlencoded данные
+                    from urllib.parse import parse_qs, unquote
+                    form_data = parse_qs(raw_body.decode('utf-8'))
+                    # Преобразуем в обычный dict (берем первое значение из списка)
+                    for key, value_list in form_data.items():
+                        value = value_list[0] if value_list else ''
+                        # Пытаемся распарсить JSON из значения
+                        try:
+                            data[key] = json.loads(unquote(value))
+                        except (json.JSONDecodeError, TypeError):
+                            data[key] = unquote(value)
+                elif 'multipart/form-data' in content_type:
+                    # Для multipart нужно использовать request.post(), но тело уже прочитано
+                    # Попробуем распарсить как JSON, если это не сработает - вернем OK
+                    try:
+                        data = json.loads(raw_body.decode('utf-8'))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        logger.warning(f"Could not parse multipart body as JSON. Raw body (first 500 chars): {raw_body[:500]}")
+                        return web.Response(text='OK', status=200)
+                else:
+                    # Пытаемся распарсить как JSON по умолчанию
+                    try:
+                        data = json.loads(raw_body.decode('utf-8'))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        logger.warning(f"Could not parse body as JSON: {e}. Content-Type: {content_type}, Raw body (first 500 chars): {raw_body[:500]}")
+                        # Возвращаем успех, чтобы Planfix не повторял запрос
+                        return web.Response(text='OK', status=200)
+            except Exception as parse_error:
+                logger.warning(f"Error parsing request body: {parse_error}. Content-Type: {content_type}, Raw body (first 500 chars): {raw_body[:500]}")
+                # Возвращаем успех, чтобы Planfix не повторял запрос
+                return web.Response(text='OK', status=200)
+        else:
+            logger.warning("Received webhook with empty body")
+            # Возвращаем успех для пустых запросов (возможно, это проверка доступности)
+            return web.Response(text='OK', status=200)
+        
+        # Логируем распарсенные данные
+        if data:
+            logger.info(f"Parsed webhook data: {json.dumps(data, ensure_ascii=False, indent=2)}")
+        else:
+            logger.warning("No data extracted from webhook")
+            return web.Response(text='OK', status=200)
         
         handler = request.app['webhook_handler']
         event_type = data.get('event')
+        
+        if not event_type:
+            logger.warning(f"Webhook received without event type. Data keys: {list(data.keys())}")
+            return web.Response(text='OK', status=200)
         
         if event_type == 'task.create':
             await handler.handle_task_created(data)
@@ -498,10 +558,12 @@ async def webhook_handler(request):
         else:
             logger.warning(f"Unknown event type: {event_type}")
         
-        return web.Response(text='OK')
+        return web.Response(text='OK', status=200)
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        return web.Response(status=500, text=str(e))
+        # Возвращаем 200 OK даже при ошибке, чтобы Planfix не повторял запрос
+        # (если это критическая ошибка, она будет залогирована выше)
+        return web.Response(text='Error', status=200)
 
 
 async def health_check(request):
