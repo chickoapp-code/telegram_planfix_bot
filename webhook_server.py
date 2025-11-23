@@ -628,9 +628,14 @@ class PlanfixWebhookHandler:
                     logger.warning(f"Executor {telegram_id} not found for approval")
                     return
                 
-                # Если planfix_user_id не передан, пытаемся извлечь из задачи
+                # Если planfix_user_id не передан, используем planfix_contact_id (ID контакта)
                 if not planfix_user_id:
-                    planfix_user_id = await self._extract_planfix_user_id(task_id)
+                    if executor.planfix_contact_id:
+                        planfix_user_id = str(executor.planfix_contact_id)
+                        logger.info(f"Using planfix_contact_id {planfix_user_id} as planfix_user_id")
+                    else:
+                        # Пытаемся извлечь из задачи (fallback)
+                        planfix_user_id = await self._extract_planfix_user_id(task_id)
                 
                 # Обновляем статус исполнителя
                 self.db_manager.update_executor_profile(

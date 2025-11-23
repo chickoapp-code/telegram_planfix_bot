@@ -850,6 +850,7 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
 
         # Создаем контакт исполнителя в Planfix
         planfix_contact_id = None
+        planfix_user_id = None  # Инициализируем переменную
         try:
             # Создаем контакт исполнителя в группе "Поддержка" с template_id
             from config import SUPPORT_CONTACT_GROUP_ID, SUPPORT_CONTACT_TEMPLATE_ID
@@ -883,6 +884,10 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                     else:
                         planfix_contact_id = str(contact_id)
                     logger.info(f"Created Planfix contact {planfix_contact_id} for executor {callback_query.from_user.id}")
+                    
+                    # Используем ID контакта как planfix_user_id
+                    planfix_user_id = planfix_contact_id
+                    logger.info(f"Using contact_id {planfix_contact_id} as planfix_user_id")
             else:
                 logger.warning(f"Failed to create Planfix contact for executor {callback_query.from_user.id}: {contact_response}")
         except Exception as e:
@@ -904,7 +909,7 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 profile_status="ожидает подтверждения",
                 serving_restaurants=serving_restaurants_payload,
                 service_direction=direction,
-                planfix_user_id=planfix_contact_id  # Сохраняем ID контакта как planfix_user_id (будет обновлен при подтверждении)
+                planfix_user_id=planfix_user_id if planfix_user_id else None  # Сохраняем ID контакта как planfix_user_id
             )
         else:
             # Создаем новый профиль
@@ -917,7 +922,7 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 profile_status="ожидает подтверждения",
                 serving_restaurants=serving_restaurants_payload,
                 service_direction=direction,
-                planfix_user_id=planfix_contact_id  # Сохраняем ID контакта как planfix_user_id (будет обновлен при подтверждении)
+                planfix_user_id=planfix_user_id if planfix_user_id else None  # Сохраняем ID контакта как planfix_user_id
             )
         
         # Создаем задачу в Planfix для подтверждения регистрации (по ТЗ)
@@ -2610,12 +2615,17 @@ async def accept_task(callback_query: CallbackQuery, state: FSMContext):
                     contact_id = contact_response.get('id') or contact_response.get('contact', {}).get('id')
                     if contact_id:
                         planfix_contact_id = int(str(contact_id).split(':')[-1]) if isinstance(contact_id, str) and ':' in contact_id else int(contact_id)
-                        # Сохраняем contact_id в профиль исполнителя
+                        
+                        # Используем ID контакта как planfix_user_id
+                        planfix_user_id = str(planfix_contact_id)
+                        
+                        # Сохраняем contact_id и planfix_user_id в профиль исполнителя
                         await db_manager.update_executor_profile(
                             executor.telegram_id,
-                            planfix_contact_id=str(planfix_contact_id)
+                            planfix_contact_id=str(planfix_contact_id),
+                            planfix_user_id=planfix_user_id
                         )
-                        logger.info(f"Created and saved Planfix contact {planfix_contact_id} for executor {executor.telegram_id}")
+                        logger.info(f"Created and saved Planfix contact {planfix_contact_id} for executor {executor.telegram_id} (planfix_user_id: {planfix_user_id})")
                 else:
                     logger.warning(f"Failed to create Planfix contact for executor {executor.telegram_id}: {contact_response}")
                     await callback_query.answer("❌ Не удалось создать контакт в Planfix", show_alert=True)
