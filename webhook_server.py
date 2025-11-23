@@ -39,6 +39,12 @@ class PlanfixWebhookHandler:
         """Проверяет все незавершенные задачи регистрации при старте."""
         try:
             logger.info("Checking pending registration tasks on startup...")
+            
+            # Убеждаемся, что status registry загружен
+            from services.status_registry import ensure_status_registry_loaded
+            await ensure_status_registry_loaded()
+            logger.info("Status registry loaded for registration tasks check")
+            
             with self.db_manager.get_db() as db:
                 from database import ExecutorProfile
                 executors = db.query(ExecutorProfile).filter(
@@ -170,6 +176,10 @@ class PlanfixWebhookHandler:
     async def handle_task_updated(self, data: dict):
         """Обработка обновления задачи."""
         try:
+            # Убеждаемся, что status registry загружен
+            from services.status_registry import ensure_status_registry_loaded
+            await ensure_status_registry_loaded()
+            
             task = data.get('task', {})
             task_id = task.get('id')
             
