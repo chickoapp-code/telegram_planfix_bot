@@ -178,7 +178,13 @@ async def approve_executor(telegram_id: int, task_id: int, db_manager: DBManager
                 f"🏢 {', '.join(concept_names)}\n\n"
                 f"Используйте меню для работы с заявками."
             )
-            await notification_service._send_notification(telegram_id, message)
+            # Отправляем сообщение с клавиатурой меню исполнителя
+            from keyboards import get_executor_main_menu_keyboard
+            await notification_service._send_notification(
+                telegram_id, 
+                message, 
+                reply_markup=get_executor_main_menu_keyboard()
+            )
             logger.info(f"✅ Executor {telegram_id} approved (planfix_user_id: {planfix_user_id})")
     finally:
         await bot.session.close()

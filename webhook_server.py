@@ -15,6 +15,7 @@ from aiogram import Bot
 
 from config import BOT_TOKEN, FRANCHISE_GROUPS, PLANFIX_TASK_PROCESS_ID
 from db_manager import DBManager
+from keyboards import get_executor_main_menu_keyboard
 from logging_config import setup_logging
 from notifications import NotificationService
 from planfix_client import planfix_client
@@ -654,7 +655,12 @@ class PlanfixWebhookHandler:
                     f"🏢 {', '.join(concept_names)}\n\n"
                     f"Используйте меню для работы с заявками."
                 )
-                await self.notification_service._send_notification(telegram_id, message)
+                # Отправляем сообщение с клавиатурой меню исполнителя
+                await self.notification_service._send_notification(
+                    telegram_id, 
+                    message, 
+                    reply_markup=get_executor_main_menu_keyboard()
+                )
                 logger.info(f"✅ Executor {telegram_id} approved via webhook (planfix_user_id: {planfix_user_id})")
         except Exception as e:
             logger.error(f"Error approving executor: {e}", exc_info=True)
