@@ -446,9 +446,21 @@ async def admin_delete_profile(callback_query: CallbackQuery, state: FSMContext)
         return
     
     try:
+        # Формат: admin_delete_user:123 или admin_delete_executor:123
         parts = callback_query.data.split(":")
-        profile_type = parts[1]  # "user" or "executor"
-        profile_id = int(parts[2])
+        if len(parts) < 2:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
+        # Извлекаем тип из первой части: "admin_delete_user" -> "user"
+        prefix = parts[0]  # "admin_delete_user" or "admin_delete_executor"
+        if "user" in prefix:
+            profile_type = "user"
+        elif "executor" in prefix:
+            profile_type = "executor"
+        else:
+            raise ValueError(f"Unknown profile type in callback_data: {callback_query.data}")
+        
+        profile_id = int(parts[1])
         
         if profile_type == "user":
             profile = await db_manager.get_user_profile(profile_id)
@@ -484,9 +496,21 @@ async def admin_confirm_delete(callback_query: CallbackQuery, state: FSMContext)
         return
     
     try:
+        # Формат: admin_confirm_delete_user:123 или admin_confirm_delete_executor:123
         parts = callback_query.data.split(":")
-        profile_type = parts[2]  # "user" or "executor"
-        profile_id = int(parts[3])
+        if len(parts) < 2:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
+        # Извлекаем тип из первой части: "admin_confirm_delete_user" -> "user"
+        prefix = parts[0]  # "admin_confirm_delete_user" or "admin_confirm_delete_executor"
+        if "user" in prefix:
+            profile_type = "user"
+        elif "executor" in prefix:
+            profile_type = "executor"
+        else:
+            raise ValueError(f"Unknown profile type in callback_data: {callback_query.data}")
+        
+        profile_id = int(parts[1])
         
         # Используем синхронный db_manager для удаления
         from db_manager import DBManager
@@ -552,9 +576,21 @@ async def admin_edit_profile(callback_query: CallbackQuery, state: FSMContext):
         return
     
     try:
+        # Формат: admin_edit_user:123 или admin_edit_executor:123
         parts = callback_query.data.split(":")
-        profile_type = parts[1]  # "user" or "executor"
-        profile_id = int(parts[2])
+        if len(parts) < 2:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
+        # Извлекаем тип из первой части: "admin_edit_user" -> "user"
+        prefix = parts[0]  # "admin_edit_user" or "admin_edit_executor"
+        if "user" in prefix:
+            profile_type = "user"
+        elif "executor" in prefix:
+            profile_type = "executor"
+        else:
+            raise ValueError(f"Unknown profile type in callback_data: {callback_query.data}")
+        
+        profile_id = int(parts[1])
         
         if profile_type == "user":
             keyboard = get_admin_edit_user_keyboard(profile_id)
@@ -578,10 +614,14 @@ async def admin_edit_field_start(callback_query: CallbackQuery, state: FSMContex
         return
     
     try:
+        # Формат: admin_edit_user_field:123:full_name или admin_edit_exec_field:123:full_name
         parts = callback_query.data.split(":")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
         profile_type = "user" if "user_field" in callback_query.data else "executor"
-        profile_id = int(parts[2])
-        field_name = parts[3]
+        profile_id = int(parts[1])  # ID находится во второй части
+        field_name = parts[2]  # Название поля находится в третьей части
         
         # Сохраняем данные в state
         await state.update_data(
@@ -782,9 +822,18 @@ async def admin_edit_direction(callback_query: CallbackQuery, state: FSMContext)
         return
     
     try:
-        direction = callback_query.data.split(":")[2]  # "it" or "se"
+        # Формат: admin_edit_dir:it или admin_edit_dir:se
+        parts = callback_query.data.split(":")
+        if len(parts) < 2:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
+        direction = parts[1]  # "it" or "se"
         data = await state.get_data()
         profile_id = data.get("admin_edit_profile_id")
+        
+        if not profile_id:
+            await callback_query.answer("❌ Не найден ID профиля. Попробуйте снова.", show_alert=True)
+            return
         
         direction_map = {"it": "ИТ служба", "se": "Служба эксплуатации"}
         direction_value = direction_map.get(direction, direction)
@@ -809,9 +858,18 @@ async def admin_edit_status(callback_query: CallbackQuery, state: FSMContext):
         return
     
     try:
-        status_key = callback_query.data.split(":")[1]
+        # Формат: admin_status:pending, admin_status:active и т.д.
+        parts = callback_query.data.split(":")
+        if len(parts) < 2:
+            raise ValueError(f"Invalid callback_data format: {callback_query.data}")
+        
+        status_key = parts[1]
         data = await state.get_data()
         profile_id = data.get("admin_edit_profile_id")
+        
+        if not profile_id:
+            await callback_query.answer("❌ Не найден ID профиля. Попробуйте снова.", show_alert=True)
+            return
         
         status_map = {
             "pending": "ожидает подтверждения",

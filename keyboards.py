@@ -20,7 +20,8 @@ def get_main_menu_keyboard():
     buttons = [
         [KeyboardButton(text="📝 Создать заявку"), KeyboardButton(text="📋 Мои заявки")],
         [KeyboardButton(text="🔍 Уточнить статус"), KeyboardButton(text="💬 Написать комментарий")],
-        [KeyboardButton(text="❌ Отменить заявку"), KeyboardButton(text="👤 Профиль")]
+        [KeyboardButton(text="❌ Отменить заявку"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🔄 Перезапустить бот")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
