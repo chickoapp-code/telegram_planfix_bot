@@ -888,7 +888,8 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                     # Убеждаемся, что status registry загружен
                     await ensure_status_registry_loaded()
                     # Получаем ID статуса "Новая" из процесса
-                    initial_status_id = require_status_id(StatusKey.NEW, required=False)
+                    from services.status_registry import get_status_id
+                    initial_status_id = get_status_id(StatusKey.NEW, required=False)
                     if initial_status_id:
                         logger.info(f"Using initial status {initial_status_id} (NEW) from process {PLANFIX_TASK_PROCESS_ID}")
                     else:
@@ -896,7 +897,9 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 except Exception as e:
                     logger.warning(f"Error getting initial status from process: {e}")
             
-            # Создаем задачу в Planfix с процессом и начальным статусом
+            # Создаем задачу в Planfix с начальным статусом из процесса
+            # Примечание: process_id не передаем напрямую, так как Planfix может не поддерживать это поле при создании
+            # Процесс будет определен автоматически по статусу или через template
             task_response = await planfix_client.create_task(
                 name=f"Регистрация исполнителя: {user_data['full_name']}",
                 description=task_description,
@@ -906,8 +909,7 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 custom_field_data=None,
                 assignee_users=[2],
                 files=None,
-                process_id=PLANFIX_TASK_PROCESS_ID if PLANFIX_TASK_PROCESS_ID else None,  # Используем процесс для быстрого получения подтверждения
-                status_id=initial_status_id  # Устанавливаем начальный статус из процесса
+                status_id=initial_status_id  # Устанавливаем начальный статус из процесса (это свяжет задачу с процессом)
             )
             
             if task_response and task_response.get('result') == 'success':
