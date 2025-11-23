@@ -104,8 +104,33 @@ class PlanfixWebhookHandler:
         if status_raw is None:
             return None
         try:
+            # Если это строка с разделителем (например, "process:123")
             if isinstance(status_raw, str) and ":" in status_raw:
                 status_raw = status_raw.split(":")[-1]
+            
+            # Если это строка с числом, преобразуем в int
+            if isinstance(status_raw, str):
+                # Пытаемся преобразовать в число
+                try:
+                    return int(status_raw)
+                except ValueError:
+                    # Если не число, пытаемся найти статус по имени
+                    from services.status_registry import get_status_id, StatusKey
+                    # Пробуем найти статус по имени (например, "В работе" -> IN_PROGRESS)
+                    status_name_lower = status_raw.lower().strip()
+                    # Маппинг русских названий на ключи статусов
+                    name_to_key = {
+                        "новая": StatusKey.NEW,
+                        "в работе": StatusKey.IN_PROGRESS,
+                        "завершена": StatusKey.COMPLETED,
+                        "завершенная": StatusKey.COMPLETED,
+                        "отменена": StatusKey.CANCELLED,
+                        "отклонена": StatusKey.REJECTED,
+                    }
+                    if status_name_lower in name_to_key:
+                        status_id = get_status_id(name_to_key[status_name_lower], required=False)
+                        if status_id:
+                            return status_id
             return int(status_raw)
         except (TypeError, ValueError):
             return None
@@ -199,6 +224,16 @@ class PlanfixWebhookHandler:
             # Получаем назначенных исполнителей
             assignees = task.get('assignees', {})
             assignee_users = assignees.get('users', []) if isinstance(assignees, dict) else []
+            
+            # Нормализуем данные исполнителей (исправляем массивы в id и name)
+            for user in assignee_users:
+                if isinstance(user, dict):
+                    # Если id - это массив, берем первый элемент
+                    if 'id' in user and isinstance(user['id'], list) and user['id']:
+                        user['id'] = user['id'][0]
+                    # Если name - это массив, берем первый элемент
+                    if 'name' in user and isinstance(user['name'], list) and user['name']:
+                        user['name'] = user['name'][0]
             
             logger.info(f"📝 Task {task_id} updated, status: {old_status_id} -> {new_status_id}")
             
@@ -535,26 +570,50 @@ async def webhook_handler(request):
                     # Сначала обрабатываем простые случаи
                     body_text = re.sub(r':\s*"(\[[^\]]*\])"', fix_array_strings, body_text)
                     
-                    # Затем обрабатываем более сложные случаи с экранированными кавычками
-                    # Ищем строки, которые начинаются с "[" и заканчиваются на "]"
-                    # и содержат внутри JSON-массив
-                    def fix_complex_array_strings(match):
-                        full_match = match.group(0)
-                        # Извлекаем содержимое между кавычками
-                        content = match.group(1)
-                        try:
-                            # Пытаемся распарсить как JSON-массив
-                            parsed = json.loads(content)
-                            if isinstance(parsed, list):
-                                # Заменяем строку на массив
-                                return f': {content}'
-                        except:
-                            pass
-                        return full_match
+                    # 3. Исправляем вложенные JSON-объекты в строках (например, comment.id)
+                    # Planfix может вставлять JSON-объекты как строки с неэкранированными кавычками
+                    # Ищем паттерн "key": "{...}" где внутри может быть JSON-объект
+                    def fix_nested_json_in_strings(text):
+                        # Ищем строки вида "id": "{...}" где внутри JSON-объект
+                        # Используем более простой подход: ищем начало объекта и пытаемся найти его конец
+                        result = []
+                        i = 0
+                        while i < len(text):
+                            # Ищем паттерн ": "{"
+                            if i < len(text) - 3 and text[i:i+3] == ': "{':
+                                # Нашли начало потенциального вложенного JSON
+                                key_start = text.rfind('"', 0, i)
+                                if key_start >= 0:
+                                    key = text[key_start+1:i]
+                                    # Пытаемся найти конец JSON-объекта
+                                    brace_count = 0
+                                    json_start = i + 2  # После ': "'
+                                    j = json_start
+                                    while j < len(text):
+                                        if text[j] == '{':
+                                            brace_count += 1
+                                        elif text[j] == '}':
+                                            brace_count -= 1
+                                            if brace_count == 0:
+                                                # Нашли конец объекта
+                                                json_str = text[json_start:j+1]
+                                                try:
+                                                    # Пытаемся распарсить как JSON
+                                                    parsed = json.loads(json_str)
+                                                    # Если успешно, заменяем строку на объект
+                                                    result.append(f'"{key}": {json.dumps(parsed, ensure_ascii=False)}')
+                                                    i = j + 2  # Пропускаем '}"'
+                                                    continue
+                                                except:
+                                                    pass
+                                                break
+                                        j += 1
+                            result.append(text[i])
+                            i += 1
+                        return ''.join(result)
                     
-                    # Ищем строки вида ": "["value"]" с учетом экранированных кавычек
-                    pattern = r':\s*"(\[(?:[^"\\]|\\.|"(?:[^"\\]|\\.)*")*\])"'
-                    body_text = re.sub(pattern, fix_complex_array_strings, body_text)
+                    # Применяем исправление вложенных JSON-объектов
+                    body_text = fix_nested_json_in_strings(body_text)
                     
                     data = json.loads(body_text)
                 elif 'application/x-www-form-urlencoded' in content_type:
