@@ -893,24 +893,36 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                     if initial_status_id:
                         logger.info(f"Using initial status {initial_status_id} (NEW) from process {PLANFIX_TASK_PROCESS_ID}")
                     else:
-                        logger.warning(f"Could not get NEW status ID from process {PLANFIX_TASK_PROCESS_ID}")
+                        logger.warning(f"Could not get NEW status ID from process {PLANFIX_TASK_PROCESS_ID}, creating task without explicit status")
                 except Exception as e:
-                    logger.warning(f"Error getting initial status from process: {e}")
+                    logger.warning(f"Error getting initial status from process: {e}, creating task without explicit status")
             
-            # Создаем задачу в Planfix с начальным статусом из процесса
-            # Примечание: process_id не передаем напрямую, так как Planfix может не поддерживать это поле при создании
-            # Процесс будет определен автоматически по статусу или через template
-            task_response = await planfix_client.create_task(
-                name=f"Регистрация исполнителя: {user_data['full_name']}",
-                description=task_description,
-                template_id=None,  # Используем стандартный шаблон
-                project_id=None,   # Используем проект по умолчанию
-                counterparty_id=None,  # Без контрагента
-                custom_field_data=None,
-                assignee_users=[2],
-                files=None,
-                status_id=initial_status_id  # Устанавливаем начальный статус из процесса (это свяжет задачу с процессом)
-            )
+            # Создаем задачу в Planfix с процессом и начальным статусом
+            # Согласно swagger.json, processId - это просто число, а не объект
+            create_task_kwargs = {
+                "name": f"Регистрация исполнителя: {user_data['full_name']}",
+                "description": task_description,
+                "template_id": None,  # Используем стандартный шаблон
+                "project_id": None,   # Используем проект по умолчанию
+                "counterparty_id": None,  # Без контрагента
+                "custom_field_data": None,
+                "assignee_users": [2],
+                "files": None,
+            }
+            
+            # Добавляем process_id если он настроен
+            if PLANFIX_TASK_PROCESS_ID:
+                create_task_kwargs["process_id"] = PLANFIX_TASK_PROCESS_ID
+                logger.info(f"Creating task with process_id={PLANFIX_TASK_PROCESS_ID}")
+            
+            # Добавляем status_id только если он получен
+            if initial_status_id:
+                create_task_kwargs["status_id"] = initial_status_id
+                logger.info(f"Creating task with status_id={initial_status_id}")
+            else:
+                logger.info("Creating task without explicit status_id (Planfix will set default)")
+            
+            task_response = await planfix_client.create_task(**create_task_kwargs)
             
             if task_response and task_response.get('result') == 'success':
                 task_id = task_response.get('id') or task_response.get('task', {}).get('id')
@@ -943,7 +955,7 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                     logger.error(f"Failed to send success notification to admins: {send_e}", exc_info=True)
                         
             else:
-                logger.error(f"Failed to create Planfix task for executor registration")
+                logger.error(f"Failed to create Planfix task for executor registration. Response: {task_response}")
                 # Fallback - отправляем уведомление через Telegram
                 admin_message = (
                     f"🆕 Новая заявка на регистрацию исполнителя:\n\n"

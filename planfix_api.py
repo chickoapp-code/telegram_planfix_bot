@@ -664,10 +664,9 @@ class PlanfixAPIClient:
             # В примерах swagger counterparty.id передается как число, хотя схема указывает string
             # Пробуем число, так как в примерах используется число
             task_data["counterparty"] = {"id": int(counterparty_id)}
-        # Примечание: process_id не передаем напрямую, так как Planfix может не поддерживать это поле при создании задачи
-        # Процесс определяется автоматически по статусу или через template
-        # if process_id:
-        #     task_data["process"] = {"id": int(process_id)}
+        if process_id:
+            # Согласно swagger.json, поле называется processId и это просто число (integer), а не объект
+            task_data["processId"] = int(process_id)
         if custom_field_data:
             if isinstance(custom_field_data, list) and len(custom_field_data) > 0:
                 task_data["customFieldData"] = custom_field_data
@@ -705,8 +704,12 @@ class PlanfixAPIClient:
                 assignees_payload["groups"] = groups
         if assignees_payload:
             task_data["assignees"] = assignees_payload
-        if status_id:
-            task_data["status"] = {"id": int(status_id)}
+        if status_id is not None:
+            # Передаем status_id только если он не None
+            try:
+                task_data["status"] = {"id": int(status_id)}
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid status_id format: {status_id}, error: {e}. Creating task without status.")
         if tags:
             normalized_tags = []
             if isinstance(tags, (list, tuple, set)):
