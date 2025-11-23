@@ -6,11 +6,11 @@ After=network.target
 Type=simple
 User=dev_bot
 Group=dev_bot
-WorkingDirectory=/home/dev_bot/telegram_planfix_bot/telegram_planfix_bot
-Environment="PATH=/home/dev_bot/telegram_planfix_bot/telegram_planfix_bot/venv/bin"
+WorkingDirectory=/home/dev_bot/telegram_planfix_bot
+Environment="PATH=/home/dev_bot/telegram_planfix_bot/venv/bin"
 Environment="SYSTEMD_SERVICE=1"
-Environment="LOG_DIR=/home/dev_bot/telegram_planfix_bot/telegram_planfix_bot/logs"
-ExecStart=/home/dev_bot/telegram_planfix_bot/telegram_planfix_bot/venv/bin/python3 /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot/run.py --mode both
+Environment="LOG_DIR=/home/dev_bot/telegram_planfix_bot/logs"
+ExecStart=/home/dev_bot/telegram_planfix_bot/venv/bin/python3 /home/dev_bot/telegram_planfix_bot/run.py --mode both
 Restart=always
 RestartSec=10
 StandardOutput=journal

@@ -6,20 +6,37 @@
 
 ### Шаг 1: Подготовка
 
-1. Убедитесь, что вы находитесь в директории проекта:
+1. **ВАЖНО:** Перейдите в директорию проекта:
    ```bash
-   cd /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot
+   cd ~/telegram_planfix_bot
+   ```
+   
+   Проверьте текущую директорию:
+   ```bash
+   pwd
+   ```
+   
+   Должно быть: `/home/dev_bot/telegram_planfix_bot`
+   
+   Проверьте наличие файла `run.py`:
+   ```bash
+   ls -la run.py
    ```
 
-2. Создайте директорию для логов:
+2. Проверьте наличие скрипта и основных файлов:
    ```bash
-   mkdir -p logs
-   chmod 755 logs
+   ls -la install_service.sh
+   ls -la run.py
+   ```
+   
+   Если файл не найден, проверьте структуру:
+   ```bash
+   find ~/telegram_planfix_bot -name "install_service.sh" -type f
    ```
 
-3. Убедитесь, что скрипт `start_bot.sh` исполняемый:
+3. Сделайте скрипт исполняемым:
    ```bash
-   chmod +x start_bot.sh
+   chmod +x install_service.sh
    ```
 
 ### Шаг 2: Установка service файла
@@ -121,7 +138,7 @@ sudo systemctl disable telegram-planfix-bot
 
 3. Запустите бота:
    ```bash
-   cd /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot
+   cd /home/dev_bot/telegram_planfix_bot
    source venv/bin/activate
    python3 run.py --mode both
    ```
@@ -136,7 +153,7 @@ sudo systemctl disable telegram-planfix-bot
 
 6. Для автозапуска через screen добавьте в `~/.bashrc` или создайте cron job:
    ```bash
-   @reboot screen -dmS telegram_bot bash -c 'cd /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot && source venv/bin/activate && python3 run.py --mode both'
+   @reboot screen -dmS telegram_bot bash -c 'cd /home/dev_bot/telegram_planfix_bot && source venv/bin/activate && python3 run.py --mode both'
    ```
 
 ## Вариант 3: Tmux (альтернативный способ)
@@ -155,7 +172,7 @@ sudo systemctl disable telegram-planfix-bot
 
 3. Запустите бота (внутри tmux):
    ```bash
-   cd /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot
+   cd /home/dev_bot/telegram_planfix_bot
    source venv/bin/activate
    python3 run.py --mode both
    ```
@@ -183,12 +200,12 @@ sudo systemctl disable telegram-planfix-bot
 
 2. Проверьте права доступа:
    ```bash
-   ls -la /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot
+   ls -la /home/dev_bot/telegram_planfix_bot
    ```
 
 3. Проверьте, что виртуальное окружение активируется:
    ```bash
-   /home/dev_bot/telegram_planfix_bot/telegram_planfix_bot/venv/bin/python3 --version
+   /home/dev_bot/telegram_planfix_bot/venv/bin/python3 --version
    ```
 
 ### Бот не отвечает

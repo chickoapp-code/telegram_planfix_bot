@@ -1,0 +1,27 @@
+БЫСТРАЯ УСТАНОВКА СЕРВИСА
+==========================
+
+1. Перейдите в директорию проекта:
+   cd ~/telegram_planfix_bot
+
+2. Проверьте текущую директорию:
+   pwd
+   (должно быть: /home/dev_bot/telegram_planfix_bot)
+
+3. Проверьте наличие скрипта:
+   ls -la install_service.sh
+
+4. Сделайте скрипт исполняемым:
+   chmod +x install_service.sh
+
+5. Запустите установку:
+   sudo ./install_service.sh
+
+6. Запустите сервис:
+   sudo systemctl start telegram-planfix-bot
+
+7. Проверьте статус:
+   sudo systemctl status telegram-planfix-bot
+
+Готово! Бот будет автоматически запускаться при перезагрузке.
+
