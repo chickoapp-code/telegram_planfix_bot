@@ -281,14 +281,44 @@ class PlanfixWebhookHandler:
                 if executor:
                     status_name = task.get('status', {}).get('name', 'Unknown')
                     logger.info(f"Found registration task {task_id} for executor {executor.telegram_id}, status_id={new_status_id}, status_name='{status_name}'")
-                    if new_status_id and status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
+                    
+                    # Проверяем по ID и по имени статуса (на случай если ID не совпадает)
+                    is_completed = False
+                    is_cancelled = False
+                    
+                    if new_status_id:
+                        from services.status_registry import get_status_id
+                        completed_id = get_status_id(StatusKey.COMPLETED, required=False)
+                        finished_id = get_status_id(StatusKey.FINISHED, required=False)
+                        cancelled_id = get_status_id(StatusKey.CANCELLED, required=False)
+                        rejected_id = get_status_id(StatusKey.REJECTED, required=False)
+                        
+                        logger.info(f"Checking status {new_status_id} ('{status_name}') against COMPLETED={completed_id}, FINISHED={finished_id}, CANCELLED={cancelled_id}, REJECTED={rejected_id}")
+                        
+                        # Проверяем по ID
+                        is_completed = status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED))
+                        is_cancelled = status_in(new_status_id, (StatusKey.CANCELLED, StatusKey.REJECTED))
+                        
+                        # Если по ID не определили, проверяем по имени
+                        if not is_completed and not is_cancelled:
+                            status_name_lower = status_name.lower().strip()
+                            if status_name_lower in ('завершена', 'завершенная', 'completed', 'finished', 'done'):
+                                logger.info(f"Status '{status_name}' recognized as completed by name")
+                                is_completed = True
+                            elif status_name_lower in ('отменена', 'отклонена', 'cancelled', 'canceled', 'rejected'):
+                                logger.info(f"Status '{status_name}' recognized as cancelled/rejected by name")
+                                is_cancelled = True
+                        
+                        logger.info(f"Final check: is_completed={is_completed}, is_cancelled={is_cancelled}")
+                    
+                    if is_completed:
                         logger.info(f"Registration task {task_id} is completed, approving executor {executor.telegram_id}")
                         await self._approve_executor(executor.telegram_id, task_id)
-                    elif new_status_id and status_in(new_status_id, (StatusKey.CANCELLED, StatusKey.REJECTED)):
+                    elif is_cancelled:
                         logger.info(f"Registration task {task_id} is cancelled/rejected, rejecting executor {executor.telegram_id}")
                         await self._reject_executor(executor.telegram_id, task_id)
                     elif new_status_id:
-                        logger.debug(f"Registration task {task_id} status {new_status_id} ('{status_name}') is not a terminal status for executor approval")
+                        logger.warning(f"Registration task {task_id} status {new_status_id} ('{status_name}') is not recognized as a terminal status for executor approval")
                     else:
                         logger.warning(f"Could not determine status for registration task {task_id}, status data: {task.get('status', {})}")
             
