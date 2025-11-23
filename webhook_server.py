@@ -223,17 +223,23 @@ class PlanfixWebhookHandler:
             
             # Получаем назначенных исполнителей
             assignees = task.get('assignees', {})
-            assignee_users = assignees.get('users', []) if isinstance(assignees, dict) else []
+            assignee_users_raw = assignees.get('users', []) if isinstance(assignees, dict) else []
             
-            # Нормализуем данные исполнителей (исправляем массивы в id и name)
-            for user in assignee_users:
-                if isinstance(user, dict):
-                    # Если id - это массив, берем первый элемент
-                    if 'id' in user and isinstance(user['id'], list) and user['id']:
-                        user['id'] = user['id'][0]
-                    # Если name - это массив, берем первый элемент
-                    if 'name' in user and isinstance(user['name'], list) and user['name']:
-                        user['name'] = user['name'][0]
+            # Нормализуем данные исполнителей
+            assignee_users = []
+            if isinstance(assignee_users_raw, list):
+                for user in assignee_users_raw:
+                    if isinstance(user, dict):
+                        # Если id - это массив, берем первый элемент
+                        if 'id' in user and isinstance(user['id'], list) and user['id']:
+                            user['id'] = user['id'][0]
+                        # Если name - это массив, берем первый элемент
+                        if 'name' in user and isinstance(user['name'], list) and user['name']:
+                            user['name'] = user['name'][0]
+                        assignee_users.append(user)
+            elif isinstance(assignee_users_raw, dict):
+                # Если users - это объект, преобразуем в массив
+                assignee_users = [assignee_users_raw]
             
             logger.info(f"📝 Task {task_id} updated, status: {old_status_id} -> {new_status_id}")
             
@@ -339,9 +345,16 @@ class PlanfixWebhookHandler:
                 # Получаем назначенных пользователей из webhook
                 assigned_user_ids = set()
                 for user in assignee_users:
-                    user_id = self._normalize_user_id(user.get('id'))
-                    if user_id:
-                        assigned_user_ids.add(user_id)
+                    # Проверяем, что user - это словарь
+                    if isinstance(user, dict):
+                        user_id = self._normalize_user_id(user.get('id'))
+                        if user_id:
+                            assigned_user_ids.add(user_id)
+                    elif isinstance(user, str):
+                        # Если user - это строка, пытаемся нормализовать её как ID
+                        user_id = self._normalize_user_id(user)
+                        if user_id:
+                            assigned_user_ids.add(user_id)
                 
                 # Находим исполнителей по planfix_user_id
                 executors = db.query(ExecutorProfile).filter(
@@ -608,6 +621,10 @@ async def webhook_handler(request):
                                     j = json_start
                                     found_end = False
                                     while j < len(text):
+                                        # Учитываем экранированные кавычки и обратные слеши
+                                        if text[j] == '\\' and j + 1 < len(text):
+                                            j += 2  # Пропускаем экранированный символ
+                                            continue
                                         if text[j] == '{':
                                             brace_count += 1
                                         elif text[j] == '}':
