@@ -2611,12 +2611,10 @@ async def accept_task(callback_query: CallbackQuery, state: FSMContext):
                     if contact_id:
                         planfix_contact_id = int(str(contact_id).split(':')[-1]) if isinstance(contact_id, str) and ':' in contact_id else int(contact_id)
                         # Сохраняем contact_id в профиль исполнителя
-                        with db_manager.get_db() as db:
-                            db_manager.update_executor_profile(
-                                db,
-                                executor.telegram_id,
-                                planfix_contact_id=str(planfix_contact_id)
-                            )
+                        await db_manager.update_executor_profile(
+                            executor.telegram_id,
+                            planfix_contact_id=str(planfix_contact_id)
+                        )
                         logger.info(f"Created and saved Planfix contact {planfix_contact_id} for executor {executor.telegram_id}")
                 else:
                     logger.warning(f"Failed to create Planfix contact for executor {executor.telegram_id}: {contact_response}")

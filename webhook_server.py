@@ -393,6 +393,38 @@ class PlanfixWebhookHandler:
                     )
                     logger.info(f"Found registration task {task_id} for executor {executor.telegram_id}, status_id={new_status_id}, status_name='{status_name}'")
                     
+                    # Извлекаем planfix_user_id из assignee в webhook данных (приоритет)
+                    planfix_user_id_from_webhook = None
+                    if assignee_users:
+                        for assignee in assignee_users:
+                            assignee_id = assignee.get('id')
+                            assignee_name = assignee.get('name')
+                            
+                            if assignee_id:
+                                # Нормализуем ID (может быть "user:123" или просто "123")
+                                normalized_id = self._normalize_user_id(assignee_id)
+                                if normalized_id:
+                                    # Проверяем, что это не имя, а ID (должно быть числом)
+                                    try:
+                                        int(normalized_id)
+                                        planfix_user_id_from_webhook = normalized_id
+                                        logger.info(f"Found planfix_user_id {planfix_user_id_from_webhook} from assignee in webhook for task {task_id}")
+                                        break
+                                    except (ValueError, TypeError):
+                                        # Это имя, а не ID, попробуем найти по имени
+                                        logger.debug(f"Assignee id '{assignee_id}' is a name, trying to find user by name")
+                                        if assignee_name:
+                                            # Пробуем найти пользователя по имени через API
+                                            try:
+                                                user_id = await self._find_user_id_by_name(assignee_name)
+                                                if user_id:
+                                                    planfix_user_id_from_webhook = user_id
+                                                    logger.info(f"Found planfix_user_id {planfix_user_id_from_webhook} by name '{assignee_name}' for task {task_id}")
+                                                    break
+                                            except Exception as e:
+                                                logger.debug(f"Failed to find user by name '{assignee_name}': {e}")
+                                        continue
+                    
                     # Проверяем по ID и по имени статуса (на случай если ID не совпадает)
                     is_completed = False
                     is_cancelled = False
@@ -424,7 +456,8 @@ class PlanfixWebhookHandler:
                     
                     if is_completed:
                         logger.info(f"Registration task {task_id} is completed, approving executor {executor.telegram_id}")
-                        await self._approve_executor(executor.telegram_id, task_id)
+                        # Передаем planfix_user_id из webhook, если он был найден
+                        await self._approve_executor(executor.telegram_id, task_id, planfix_user_id=planfix_user_id_from_webhook)
                     elif is_cancelled:
                         logger.info(f"Registration task {task_id} is cancelled/rejected, rejecting executor {executor.telegram_id}")
                         await self._reject_executor(executor.telegram_id, task_id)
@@ -585,7 +618,7 @@ class PlanfixWebhookHandler:
         except Exception as e:
             logger.error(f"Error handling task completion for task {task_id}: {e}", exc_info=True)
     
-    async def _approve_executor(self, telegram_id: int, task_id: int):
+    async def _approve_executor(self, telegram_id: int, task_id: int, planfix_user_id: Optional[str] = None):
         """Подтверждает регистрацию исполнителя."""
         try:
             with self.db_manager.get_db() as db:
@@ -595,8 +628,9 @@ class PlanfixWebhookHandler:
                     logger.warning(f"Executor {telegram_id} not found for approval")
                     return
                 
-                # Извлекаем planfix_user_id из задачи (используем логику из planfix_sync.py)
-                planfix_user_id = await self._extract_planfix_user_id(task_id)
+                # Если planfix_user_id не передан, пытаемся извлечь из задачи
+                if not planfix_user_id:
+                    planfix_user_id = await self._extract_planfix_user_id(task_id)
                 
                 # Обновляем статус исполнителя
                 self.db_manager.update_executor_profile(
@@ -620,13 +654,57 @@ class PlanfixWebhookHandler:
         except Exception as e:
             logger.error(f"Error approving executor: {e}", exc_info=True)
     
+    async def _find_user_id_by_name(self, user_name: str) -> Optional[str]:
+        """Находит Planfix User ID по имени пользователя."""
+        try:
+            # Пробуем найти пользователя через поиск контактов
+            # В Planfix пользователи могут быть контактами
+            # Используем get_contact_list_by_group с фильтром по имени
+            # Но сначала нужно получить все группы или использовать общий поиск
+            # Попробуем использовать метод get_contact_list_by_group с фильтром
+            endpoint = "/contact/list"
+            data = {
+                "filters": [
+                    {
+                        "type": 4001,  # Фильтр по имени контакта
+                        "operator": "equal",
+                        "value": user_name
+                    }
+                ],
+                "fields": "id,name,userGeneralId",
+                "pageSize": 10
+            }
+            search_response = await planfix_client._request("POST", endpoint, data=data)
+            
+            if search_response and search_response.get('result') == 'success':
+                contacts = search_response.get('contacts', [])
+                for contact in contacts:
+                    # Проверяем, есть ли у контакта userGeneralId (это означает, что это пользователь)
+                    user_general_id = contact.get('userGeneralId')
+                    if user_general_id:
+                        logger.info(f"Found user ID {user_general_id} for name '{user_name}'")
+                        return str(user_general_id)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Error finding user by name '{user_name}': {e}")
+            return None
+    
     async def _extract_planfix_user_id(self, task_id: int) -> Optional[str]:
         """Извлекает planfix_user_id из задачи регистрации."""
         try:
-            task_response = await planfix_client.get_task_by_id(
-                task_id,
-                fields="id,name,description,customFieldData,comments,assignees"
-            )
+            # Пробуем использовать generalId вместо id для запроса задачи
+            # Иногда API не принимает id, но принимает generalId
+            task_response = None
+            try:
+                task_response = await planfix_client.get_task_by_id(
+                    task_id,
+                    fields="id,name,description,customFieldData,comments,assignees"
+                )
+            except Exception as api_err:
+                logger.warning(f"Failed to get task {task_id} by id, error: {api_err}")
+                # Если не получилось по id, пробуем найти через другие методы
+                return None
             
             if not task_response or task_response.get('result') != 'success':
                 return None
@@ -640,11 +718,23 @@ class PlanfixWebhookHandler:
                 if users and isinstance(users, list) and len(users) > 0:
                     first_assignee = users[0]
                     assignee_id = first_assignee.get('id')
+                    assignee_name = first_assignee.get('name')
+                    
                     if assignee_id:
                         planfix_user_id = self._normalize_user_id(assignee_id)
                         if planfix_user_id:
-                            logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
-                            return planfix_user_id
+                            # Проверяем, что это ID, а не имя
+                            try:
+                                int(planfix_user_id)
+                                logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
+                                return planfix_user_id
+                            except (ValueError, TypeError):
+                                # Это имя, пробуем найти по имени
+                                if assignee_name:
+                                    user_id = await self._find_user_id_by_name(assignee_name)
+                                    if user_id:
+                                        logger.info(f"Found planfix_user_id {user_id} by name '{assignee_name}' for task {task_id}")
+                                        return user_id
             
             # ПРИОРИТЕТ 2: Ищем в кастомных полях
             custom_fields = task.get('customFieldData', [])
@@ -659,6 +749,7 @@ class PlanfixWebhookHandler:
             
             # ПРИОРИТЕТ 3: Ищем в описании
             description = task.get('description', '')
+            # Ищем "Planfix User ID" или "Telegram ID" (для задач регистрации)
             match = re.search(r'[Pp]lanfix\s+[Uu]ser\s+ID[:\s]+(\d+)', description)
             if match:
                 planfix_user_id = match.group(1)
@@ -670,11 +761,23 @@ class PlanfixWebhookHandler:
             if isinstance(comments, list):
                 for comment in comments:
                     comment_text = comment.get('description', '') if isinstance(comment, dict) else str(comment)
+                    # Ищем "Planfix User ID" или "Telegram ID" в комментариях
                     match = re.search(r'[Pp]lanfix\s+[Uu]ser\s+ID[:\s]+(\d+)', comment_text)
                     if match:
                         planfix_user_id = match.group(1)
                         logger.info(f"Found planfix_user_id {planfix_user_id} in task comment")
                         return planfix_user_id
+                    
+                    # Также ищем в JSON комментария (если есть)
+                    comment_json = comment.get('json', {}) if isinstance(comment, dict) else {}
+                    if isinstance(comment_json, dict):
+                        comment_json_text = comment_json.get('description', '')
+                        if comment_json_text:
+                            match = re.search(r'[Pp]lanfix\s+[Uu]ser\s+ID[:\s]+(\d+)', comment_json_text)
+                            if match:
+                                planfix_user_id = match.group(1)
+                                logger.info(f"Found planfix_user_id {planfix_user_id} in task comment JSON")
+                                return planfix_user_id
             
             return None
         except Exception as e:
