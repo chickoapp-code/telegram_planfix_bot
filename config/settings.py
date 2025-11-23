@@ -58,11 +58,11 @@ class Settings(BaseSettings):
         default="Ожидает информации", alias="PLANFIX_STATUS_NAME_WAITING_INFO"
     )
 
-    custom_field_restaurant_id: int = Field(alias="CUSTOM_FIELD_RESTAURANT_ID")
-    custom_field_contact_id: int = Field(alias="CUSTOM_FIELD_CONTACT_ID")
-    custom_field_phone_id: int = Field(alias="CUSTOM_FIELD_PHONE_ID")
-    custom_field_type_id: int = Field(alias="CUSTOM_FIELD_TYPE_ID")
-    custom_field_mobile_phone_id: int = Field(alias="CUSTOM_FIELD_MOBILE_PHONE_ID")
+    custom_field_restaurant_id: int | None = Field(default=None, alias="CUSTOM_FIELD_RESTAURANT_ID")
+    custom_field_contact_id: int | None = Field(default=None, alias="CUSTOM_FIELD_CONTACT_ID")
+    custom_field_phone_id: int | None = Field(default=None, alias="CUSTOM_FIELD_PHONE_ID")
+    custom_field_type_id: int | None = Field(default=None, alias="CUSTOM_FIELD_TYPE_ID")
+    custom_field_mobile_phone_id: int | None = Field(default=None, alias="CUSTOM_FIELD_MOBILE_PHONE_ID")
 
     directory_restaurants_id: int | None = Field(default=None, alias="DIRECTORY_RESTAURANTS_ID")
 
@@ -129,6 +129,31 @@ class Settings(BaseSettings):
                 return None
             return sanitized
         return value
+
+    @field_validator(
+        "custom_field_restaurant_id",
+        "custom_field_contact_id",
+        "custom_field_phone_id",
+        "custom_field_type_id",
+        "custom_field_mobile_phone_id",
+        mode="before",
+    )
+    @classmethod
+    def _parse_optional_custom_field(cls, value):
+        """Обрабатывает пустые строки и комментарии как None для опциональных кастомных полей."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            sanitized = value.strip()
+            if not sanitized or sanitized.startswith("#"):
+                return None
+            try:
+                return int(sanitized)
+            except ValueError:
+                return None
+        if isinstance(value, int):
+            return value
+        return None
 
 
 settings = Settings()

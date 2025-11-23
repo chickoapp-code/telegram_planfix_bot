@@ -58,11 +58,26 @@ PLANFIX_STATUS_NAMES: Dict[str, str | None] = {
     "waiting_info": PLANFIX_STATUS_NAME_WAITING_INFO,
 }
 
+# Кастомные поля Planfix (опциональные для утилит, обязательные для основного бота)
 CUSTOM_FIELD_RESTAURANT_ID = settings.custom_field_restaurant_id
 CUSTOM_FIELD_CONTACT_ID = settings.custom_field_contact_id
 CUSTOM_FIELD_PHONE_ID = settings.custom_field_phone_id
 CUSTOM_FIELD_TYPE_ID = settings.custom_field_type_id
 CUSTOM_FIELD_MOBILE_PHONE_ID = settings.custom_field_mobile_phone_id
+
+
+def _require_custom_field(field_name: str, field_value: int | None) -> int:
+    """Проверяет, что кастомное поле задано, и возвращает его значение.
+    
+    Используется в местах, где поле обязательно для работы функционала.
+    """
+    if field_value is None:
+        raise ValueError(
+            f"Кастомное поле {field_name} не задано в .env файле. "
+            f"Это поле обязательно для работы данного функционала. "
+            f"Пожалуйста, добавьте его в .env файл."
+        )
+    return field_value
 
 DIRECTORY_RESTAURANTS_ID = settings.directory_restaurants_id
 
