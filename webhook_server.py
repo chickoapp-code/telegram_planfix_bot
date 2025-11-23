@@ -263,13 +263,14 @@ class PlanfixWebhookHandler:
             
             # Получаем новый статус
             # Planfix может передавать статус в разных форматах:
-            # 1. task.status.id и task.status.name (стандартный формат)
-            # 2. task.status["task.status.id"] и task.status["task.status.name"] (альтернативный формат из шаблона)
+            # 1. task.status["task.status.id"] и task.status["task.status.name"] (формат из шаблона - приоритетный, т.к. содержит ID)
+            # 2. task.status.id и task.status.name (стандартный формат, но id может быть строкой с названием)
             status_obj = task.get('status', {})
+            # Сначала проверяем task.status.id (из шаблона), т.к. там обычно числовой ID
             status_id_raw = (
-                status_obj.get('id') or 
                 status_obj.get('task.status.id') or 
-                status_obj.get('task.status.Идентификатор')  # На случай если переменная не подставилась
+                status_obj.get('task.status.Идентификатор') or
+                status_obj.get('id')  # Может быть строкой с названием, но проверим
             )
             status_name_raw = (
                 status_obj.get('name') or 
@@ -307,14 +308,34 @@ class PlanfixWebhookHandler:
             # Проверяем, это задача регистрации исполнителя
             # ВАЖНО: task_id из webhook - это id (внутренний), а не generalId
             # Но в базе может быть сохранен как id, так и generalId
-            # Поэтому ищем по обоим вариантам
+            # Также в webhook может быть generalId, который можно использовать для поиска
+            general_id_from_webhook = task.get('generalId')
+            if isinstance(general_id_from_webhook, str):
+                try:
+                    general_id_from_webhook = int(general_id_from_webhook)
+                except (ValueError, TypeError):
+                    general_id_from_webhook = None
+            
             with self.db_manager.get_db() as db:
                 from database import ExecutorProfile
-                # Сначала ищем по точному совпадению
+                # Сначала ищем по точному совпадению task_id (внутренний id)
                 executor = db.query(ExecutorProfile).filter(
                     ExecutorProfile.registration_task_id == task_id,
                     ExecutorProfile.profile_status == "ожидает подтверждения"
                 ).first()
+                
+                # Если не нашли и есть generalId в webhook, ищем по нему
+                if not executor and general_id_from_webhook:
+                    logger.debug(f"Task {task_id} not found by id, trying to find by generalId={general_id_from_webhook} from webhook")
+                    executor = db.query(ExecutorProfile).filter(
+                        ExecutorProfile.registration_task_id == general_id_from_webhook,
+                        ExecutorProfile.profile_status == "ожидает подтверждения"
+                    ).first()
+                    if executor:
+                        logger.info(f"Found executor {executor.telegram_id} by generalId={general_id_from_webhook}, updating registration_task_id to id={task_id}")
+                        # Обновляем registration_task_id на правильный id для будущих поисков
+                        executor.registration_task_id = task_id
+                        db.commit()
                 
                 # Если не нашли, пробуем найти по generalId (если в базе сохранен generalId)
                 # В базе может быть сохранен generalId, а в webhook приходит id

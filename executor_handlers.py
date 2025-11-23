@@ -963,14 +963,27 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 if general_id:
                     try:
                         # Запрашиваем задачу по generalId, чтобы получить внутренний id
+                        # Нужно запросить и id, и generalId, чтобы различить их
                         task_info = await planfix_client.get_task_by_id(
                             general_id,
-                            fields="id"
+                            fields="id,generalId"
                         )
                         if task_info and task_info.get('result') == 'success':
                             task_info_data = task_info.get('task', {})
-                            task_id = task_info_data.get('id')
-                            logger.info(f"Got task id={task_id} for generalId={general_id}")
+                            # API может вернуть generalId в поле id, если запрашиваем по generalId
+                            # Поэтому проверяем: если id == generalId, значит это generalId, а не внутренний id
+                            returned_id = task_info_data.get('id')
+                            returned_general_id = task_info_data.get('generalId')
+                            
+                            # Если id совпадает с generalId, значит API вернул generalId в поле id
+                            # В этом случае нужно использовать id из webhook или запросить по-другому
+                            if returned_id and str(returned_id) == str(general_id):
+                                logger.warning(f"API returned generalId ({returned_id}) in id field for generalId={general_id}. Will use webhook id when available.")
+                                # Не используем этот id, т.к. это generalId, а не внутренний id
+                                task_id = None
+                            else:
+                                task_id = returned_id
+                                logger.info(f"Got task id={task_id} (generalId={returned_general_id}) for generalId={general_id}")
                     except Exception as e:
                         logger.warning(f"Failed to get task id for generalId={general_id}: {e}")
                 
