@@ -273,9 +273,35 @@ def _extract_task_tags(task: dict) -> Set[str]:
 
 
 async def _load_restaurant_map(concept_ids: List[int]) -> Dict[int, str]:
+    """Загружает карту ресторанов из групп концепций, исключая контакты из группы 'Поддержка'."""
+    from config import SUPPORT_CONTACT_GROUP_ID
     restaurants_map: Dict[int, str] = {}
+    support_group_id = SUPPORT_CONTACT_GROUP_ID
+    
+    # Множество контактов, которые находятся в группе "Поддержка" (для исключения)
+    support_contact_ids: Set[int] = set()
+    
+    # Сначала получаем все контакты из группы "Поддержка", чтобы исключить их
+    if support_group_id:
+        try:
+            support_contacts_response = await planfix_client.get_contact_list_by_group(
+                support_group_id, fields="id", page_size=1000
+            )
+            if support_contacts_response and support_contacts_response.get('result') == 'success':
+                for c in support_contacts_response.get('contacts', []):
+                    try:
+                        cid = int(c.get('id'))
+                        support_contact_ids.add(cid)
+                    except Exception:
+                        continue
+                logger.debug(f"Found {len(support_contact_ids)} contacts in support group {support_group_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load support group contacts for filtering: {e}")
+    
+    # Теперь загружаем контакты из групп концепций, исключая те, что в группе "Поддержка"
     for group_id in concept_ids:
         try:
+            # Запрашиваем контакты из группы концепции
             contacts_response = await planfix_client.get_contact_list_by_group(
                 group_id, fields="id,name", page_size=100
             )
@@ -285,6 +311,12 @@ async def _load_restaurant_map(concept_ids: List[int]) -> Dict[int, str]:
                         cid = int(c.get('id'))
                     except Exception:
                         continue
+                    
+                    # Пропускаем контакты, которые находятся в группе "Поддержка"
+                    if cid in support_contact_ids:
+                        logger.debug(f"Skipping contact {cid} (in support group {support_group_id})")
+                        continue
+                    
                     name = (c.get('name') or f"Контакт {cid}").strip()
                     restaurants_map[cid] = name
             else:

@@ -158,9 +158,24 @@ class TaskNotificationService:
             counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
             task_tags = _extract_task_tags(task)
             
+            # Определяем направление задачи по шаблону или по тегам
+            task_direction = None
+            if template_id in PLANFIX_IT_TEMPLATES:
+                task_direction = "it"
+            elif template_id in PLANFIX_SE_TEMPLATES:
+                task_direction = "se"
+            else:
+                # Пробуем определить по тегам
+                if task_tags:
+                    if PLANFIX_IT_TAG and PLANFIX_IT_TAG.lower() in task_tags:
+                        task_direction = "it"
+                    elif PLANFIX_SE_TAG and PLANFIX_SE_TAG.lower() in task_tags:
+                        task_direction = "se"
+            
             logger.info(
                 f"Notifying executors about task {task_id}: "
-                f"template_id={template_id}, counterparty_id={counterparty_id}, tags={task_tags}"
+                f"template_id={template_id}, counterparty_id={counterparty_id}, "
+                f"tags={task_tags}, task_direction={task_direction}"
             )
             
             # Получаем имя ресторана
@@ -244,6 +259,23 @@ class TaskNotificationService:
             for executor in executors:
                 # Применяем те же фильтры, что и в show_new_tasks
                 
+                # Фильтр 0: Направление задачи должно совпадать с направлением исполнителя (если оба заданы)
+                executor_direction = (executor.service_direction or "").strip().lower()
+                if task_direction and executor_direction:
+                    # Нормализуем направление исполнителя
+                    executor_dir_normalized = None
+                    if executor_direction in ("it", "ит", "it отдел", "it-служба", "it служба"):
+                        executor_dir_normalized = "it"
+                    elif executor_direction in ("se", "сэ", "служба эксплуатации", "эксплуатация", "отдел эксплуатации"):
+                        executor_dir_normalized = "se"
+                    
+                    if executor_dir_normalized and executor_dir_normalized != task_direction:
+                        logger.debug(
+                            f"Executor {executor.telegram_id} filtered out: "
+                            f"task direction {task_direction} != executor direction {executor_dir_normalized}"
+                        )
+                        continue
+                
                 # Фильтр 1: Шаблон задачи должен быть в списке разрешенных шаблонов исполнителя
                 allowed_templates = _get_allowed_template_ids(executor)
                 if allowed_templates:
@@ -265,6 +297,7 @@ class TaskNotificationService:
                         continue
                 
                 # Фильтр 3: Теги задачи должны пересекаться с разрешенными тегами исполнителя
+                # (только если у задачи есть теги, иначе пропускаем этот фильтр)
                 allowed_tags = _get_allowed_tags(executor)
                 allowed_tag_names = {tag.lower() for tag in allowed_tags if isinstance(tag, str)}
                 if allowed_tag_names and task_tags:

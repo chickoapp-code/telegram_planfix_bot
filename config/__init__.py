@@ -144,7 +144,7 @@ PLANFIX_IT_TEMPLATES: Dict[int, Dict[str, object]] = {
 }
 
 PLANFIX_IT_TAG = "ИТ отдел"
-PLANFIX_SE_TAG = "Отдел эксплуатации"
+PLANFIX_SE_TAG = "СЛУЖБА ЭКСПЛУАТАЦИИ"
 UNIVERSAL_TEMPLATE_ENABLED = False
 
 # Группа контактов для поддержки (исполнители и заявители)
