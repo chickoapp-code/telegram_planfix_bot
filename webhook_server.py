@@ -497,7 +497,19 @@ async def webhook_handler(request):
             try:
                 if 'application/json' in content_type:
                     # Парсим JSON из сырого тела
-                    data = json.loads(raw_body.decode('utf-8'))
+                    body_text = raw_body.decode('utf-8')
+                    # Удаляем markdown-код блоки, если они есть (```json ... ```)
+                    body_text = body_text.strip()
+                    if body_text.startswith('```'):
+                        # Удаляем начальный ```json или ```
+                        lines = body_text.split('\n')
+                        if lines[0].startswith('```'):
+                            lines = lines[1:]
+                        # Удаляем конечный ```
+                        if lines and lines[-1].strip() == '```':
+                            lines = lines[:-1]
+                        body_text = '\n'.join(lines)
+                    data = json.loads(body_text)
                 elif 'application/x-www-form-urlencoded' in content_type:
                     # Парсим form-urlencoded данные
                     from urllib.parse import parse_qs, unquote
@@ -514,14 +526,34 @@ async def webhook_handler(request):
                     # Для multipart нужно использовать request.post(), но тело уже прочитано
                     # Попробуем распарсить как JSON, если это не сработает - вернем OK
                     try:
-                        data = json.loads(raw_body.decode('utf-8'))
+                        body_text = raw_body.decode('utf-8')
+                        # Удаляем markdown-код блоки, если они есть (```json ... ```)
+                        body_text = body_text.strip()
+                        if body_text.startswith('```'):
+                            lines = body_text.split('\n')
+                            if lines[0].startswith('```'):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip() == '```':
+                                lines = lines[:-1]
+                            body_text = '\n'.join(lines)
+                        data = json.loads(body_text)
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         logger.warning(f"Could not parse multipart body as JSON. Raw body (first 500 chars): {raw_body[:500]}")
                         return web.Response(text='OK', status=200)
                 else:
                     # Пытаемся распарсить как JSON по умолчанию
                     try:
-                        data = json.loads(raw_body.decode('utf-8'))
+                        body_text = raw_body.decode('utf-8')
+                        # Удаляем markdown-код блоки, если они есть (```json ... ```)
+                        body_text = body_text.strip()
+                        if body_text.startswith('```'):
+                            lines = body_text.split('\n')
+                            if lines[0].startswith('```'):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip() == '```':
+                                lines = lines[:-1]
+                            body_text = '\n'.join(lines)
+                        data = json.loads(body_text)
                     except (json.JSONDecodeError, UnicodeDecodeError) as e:
                         logger.warning(f"Could not parse body as JSON: {e}. Content-Type: {content_type}, Raw body (first 500 chars): {raw_body[:500]}")
                         # Возвращаем успех, чтобы Planfix не повторял запрос
