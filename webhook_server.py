@@ -574,8 +574,25 @@ async def webhook_handler(request):
                     # Planfix может вставлять JSON-объекты как строки с неэкранированными кавычками
                     # Ищем паттерн "key": "{...}" где внутри может быть JSON-объект
                     def fix_nested_json_in_strings(text):
+                        # Используем регулярное выражение для поиска паттерна "key": "{...}"
                         # Ищем строки вида "id": "{...}" где внутри JSON-объект
-                        # Используем более простой подход: ищем начало объекта и пытаемся найти его конец
+                        import re
+                        pattern = r'"([^"]+)":\s*"(\{.*?\})"'
+                        
+                        def replace_nested_json(match):
+                            key = match.group(1)
+                            json_str = match.group(2)
+                            try:
+                                # Пытаемся распарсить как JSON
+                                parsed = json.loads(json_str)
+                                # Если успешно, заменяем строку на объект
+                                return f'"{key}": {json.dumps(parsed, ensure_ascii=False)}'
+                            except:
+                                # Если не удалось, оставляем как есть
+                                return match.group(0)
+                        
+                        # Применяем замену, но нужно найти правильный конец объекта
+                        # Используем более сложный подход с подсчетом скобок
                         result = []
                         i = 0
                         while i < len(text):
@@ -589,6 +606,7 @@ async def webhook_handler(request):
                                     brace_count = 0
                                     json_start = i + 2  # После ': "'
                                     j = json_start
+                                    found_end = False
                                     while j < len(text):
                                         if text[j] == '{':
                                             brace_count += 1
@@ -603,19 +621,38 @@ async def webhook_handler(request):
                                                     # Если успешно, заменяем строку на объект
                                                     result.append(f'"{key}": {json.dumps(parsed, ensure_ascii=False)}')
                                                     i = j + 2  # Пропускаем '}"'
-                                                    continue
-                                                except:
+                                                    found_end = True
+                                                    break
+                                                except Exception as e:
+                                                    # Если не удалось распарсить, продолжаем поиск
                                                     pass
-                                                break
                                         j += 1
+                                    if found_end:
+                                        continue
                             result.append(text[i])
                             i += 1
                         return ''.join(result)
                     
-                    # Применяем исправление вложенных JSON-объектов
+                    # Применяем исправление вложенных JSON-объектов ПЕРЕД парсингом
                     body_text = fix_nested_json_in_strings(body_text)
                     
                     data = json.loads(body_text)
+                    
+                    # Постобработка: нормализуем массивы в данных (если они остались массивами)
+                    def normalize_arrays(obj):
+                        """Рекурсивно нормализует массивы в объекте."""
+                        if isinstance(obj, dict):
+                            for key, value in obj.items():
+                                # Если значение - массив с одним элементом, заменяем на элемент
+                                if isinstance(value, list) and len(value) == 1:
+                                    obj[key] = normalize_arrays(value[0])
+                                else:
+                                    obj[key] = normalize_arrays(value)
+                        elif isinstance(obj, list):
+                            return [normalize_arrays(item) for item in obj]
+                        return obj
+                    
+                    data = normalize_arrays(data)
                 elif 'application/x-www-form-urlencoded' in content_type:
                     # Парсим form-urlencoded данные
                     from urllib.parse import parse_qs, unquote
