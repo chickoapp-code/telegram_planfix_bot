@@ -77,19 +77,67 @@ class Settings(BaseSettings):
     webhook_host: str = Field(default="127.0.0.1", alias="WEBHOOK_HOST")
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
 
-    telegram_admin_ids: List[int] = Field(default_factory=list, alias="TELEGRAM_ADMIN_IDS")
-
-    @field_validator("telegram_admin_ids", mode="before")
-    @classmethod
-    def _parse_admin_ids(cls, value: Sequence[int] | str | None) -> List[int]:
+    _telegram_admin_ids_raw: str | List[int] | None = Field(default=None, alias="TELEGRAM_ADMIN_IDS", exclude=True)
+    
+    @property
+    def telegram_admin_ids(self) -> List[int]:
+        """Парсит строку с ID через запятую или список в List[int]."""
+        value = self._telegram_admin_ids_raw
         if value is None:
             return []
         if isinstance(value, (list, tuple)):
             return [int(v) for v in value]
         if isinstance(value, str):
+            # Обрабатываем пустую строку
+            value = value.strip()
+            if not value or value.startswith("#"):
+                return []
+            # Пробуем распарсить как JSON (если это JSON массив)
+            try:
+                import json
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [int(v) for v in parsed]
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+            # Если не JSON, парсим как строку с запятыми
             parts = [part.strip() for part in value.split(",")]
             return [int(part) for part in parts if part]
-        return [int(value)]
+        # Пробуем преобразовать в int и вернуть как список
+        try:
+            return [int(value)]
+        except (ValueError, TypeError):
+            return []
+
+    @field_validator("_telegram_admin_ids_raw", mode="before")
+    @classmethod
+    def _parse_admin_ids(cls, value) -> str | List[int] | None:
+        """Парсит строку с ID через запятую или список в List[int]."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [int(v) for v in value]
+        if isinstance(value, str):
+            # Обрабатываем пустую строку
+            value = value.strip()
+            if not value or value.startswith("#"):
+                return []
+            # Пробуем распарсить как JSON (если это JSON массив)
+            try:
+                import json
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [int(v) for v in parsed]
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+            # Если не JSON, парсим как строку с запятыми
+            parts = [part.strip() for part in value.split(",")]
+            return [int(part) for part in parts if part]
+        # Пробуем преобразовать в int и вернуть как список
+        try:
+            return [int(value)]
+        except (ValueError, TypeError):
+            return []
 
     @property
     def db_path(self) -> Path:
