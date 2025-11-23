@@ -607,19 +607,20 @@ class PlanfixAPIClient:
             data["position"] = position
         
         # Добавляем Telegram если указан
-        # Согласно swagger.json, есть два поля: telegram (URL или username) и telegramId (ID)
+        # Согласно swagger.json, есть два поля: telegram (URL) и telegramId (ID)
+        # telegram должен быть в формате "https://t.me/username"
         if telegram:
             # Если telegram начинается с @, убираем его
-            telegram_clean = telegram.lstrip('@')
-            # Если не начинается с https://, добавляем префикс
-            if not telegram_clean.startswith('https://') and not telegram_clean.startswith('http://'):
+            telegram_clean = telegram.lstrip('@').strip()
+            if telegram_clean:
+                # Всегда формируем полный URL согласно swagger.json
                 data["telegram"] = f"https://t.me/{telegram_clean}"
-            else:
-                data["telegram"] = telegram_clean
+                logger.debug(f"Setting telegram field to: {data['telegram']}")
         
         if telegram_id:
             # telegramId должен быть строкой согласно swagger.json
             data["telegramId"] = str(telegram_id)
+            logger.debug(f"Setting telegramId field to: {data['telegramId']}")
             
         # Добавляем кастомные поля если есть
         if custom_field_data:
@@ -629,9 +630,21 @@ class PlanfixAPIClient:
         if template_id:
             data["template"] = {"id": int(template_id)}
         
+        # Логируем данные перед отправкой (для отладки)
+        import json
+        logger.debug(f"Creating contact with data keys: {list(data.keys())}")
+        if "telegram" in data:
+            logger.info(f"Telegram field will be set to: {data['telegram']}")
+        if "telegramId" in data:
+            logger.info(f"TelegramId field will be set to: {data['telegramId']}")
+        if "position" in data:
+            logger.info(f"Position field will be set to: {data['position']}")
+        
         # Пробуем создать контакт
         try:
-            return await self._request("POST", endpoint, data=data)
+            result = await self._request("POST", endpoint, data=data)
+            logger.info(f"Contact created successfully")
+            return result
         except Exception as e:
             # Если ошибка 400 и есть группа или template, пробуем без них
             error_str = str(e).lower()
@@ -640,11 +653,15 @@ class PlanfixAPIClient:
             if is_bad_request and (group_id or template_id):
                 logger.warning(f"Failed to create contact with group/template, trying without them: {e}")
                 # Создаем копию данных без группы и template
+                # ВАЖНО: telegram, telegramId, position и другие поля должны остаться!
                 data_fallback = data.copy()
                 data_fallback.pop("group", None)
                 data_fallback.pop("template", None)
+                logger.info(f"Retrying contact creation without group/template. Telegram fields preserved: telegram={data_fallback.get('telegram')}, telegramId={data_fallback.get('telegramId')}, position={data_fallback.get('position')}")
                 try:
-                    return await self._request("POST", endpoint, data=data_fallback)
+                    result = await self._request("POST", endpoint, data=data_fallback)
+                    logger.info(f"Contact created successfully (without group/template)")
+                    return result
                 except Exception as fallback_error:
                     logger.error(f"Failed to create contact even without group/template: {fallback_error}")
                     raise

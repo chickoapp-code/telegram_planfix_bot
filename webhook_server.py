@@ -283,37 +283,48 @@ class PlanfixWebhookHandler:
                 ).first()
                 
                 # Если не нашли, пробуем найти по generalId (если в базе сохранен generalId)
-                # Для этого нужно получить generalId из задачи
+                # В базе может быть сохранен generalId, а в webhook приходит id
+                # Проверяем все задачи регистрации через API, чтобы найти совпадение
                 if not executor:
-                    logger.debug(f"Task {task_id} not found by id, trying to get generalId")
-                    try:
-                        task_response = await planfix_client.get_task_by_id(
-                            task_id,
-                            fields="id,generalId"
-                        )
-                        if task_response and task_response.get('result') == 'success':
-                            task_data = task_response.get('task', {})
-                            general_id = task_data.get('generalId')
-                            if general_id:
-                                logger.info(f"Task {task_id} has generalId={general_id}, searching by generalId")
-                                executor = db.query(ExecutorProfile).filter(
-                                    ExecutorProfile.registration_task_id == general_id,
-                                    ExecutorProfile.profile_status == "ожидает подтверждения"
-                                ).first()
-                                if executor:
-                                    logger.info(f"Found executor by generalId={general_id}, updating registration_task_id to id={task_id}")
+                    logger.debug(f"Task {task_id} not found by id, trying to find by checking all pending registration tasks")
+                    all_pending = db.query(ExecutorProfile).filter(
+                        ExecutorProfile.profile_status == "ожидает подтверждения"
+                    ).all()
+                    logger.debug(f"Checking {len(all_pending)} pending registration tasks for task {task_id}")
+                    
+                    # Проверяем каждую задачу регистрации через API
+                    for pending_executor in all_pending:
+                        if not pending_executor.registration_task_id:
+                            continue
+                        
+                        saved_id = pending_executor.registration_task_id
+                        logger.debug(f"Checking executor {pending_executor.telegram_id} with registration_task_id={saved_id}")
+                        
+                        # Пробуем получить задачу по сохраненному ID
+                        try:
+                            # Если сохранен generalId, запрос по нему вернет задачу с id
+                            # Если сохранен id, запрос по нему вернет ту же задачу
+                            check_response = await planfix_client.get_task_by_id(
+                                saved_id,
+                                fields="id"
+                            )
+                            if check_response and check_response.get('result') == 'success':
+                                check_task_data = check_response.get('task', {})
+                                check_task_id = check_task_data.get('id')
+                                # Если id из запроса совпадает с task_id из webhook, это наша задача
+                                if check_task_id and str(check_task_id) == str(task_id):
+                                    executor = pending_executor
+                                    logger.info(f"Found executor {pending_executor.telegram_id} by matching task: saved_id={saved_id} -> task_id={task_id}")
                                     # Обновляем registration_task_id на правильный id для будущих поисков
                                     executor.registration_task_id = task_id
                                     db.commit()
-                            else:
-                                logger.warning(f"Task {task_id} has no generalId in response")
-                        else:
-                            logger.warning(f"Failed to get task {task_id} to find generalId: {task_response}")
-                    except Exception as e:
-                        logger.warning(f"Error getting task {task_id} to find generalId: {e}", exc_info=True)
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Error checking task {saved_id} for executor {pending_executor.telegram_id}: {e}")
+                            continue
                 
                 if not executor:
-                    logger.debug(f"No executor found for registration task {task_id}")
+                    logger.warning(f"No executor found for registration task {task_id}. This may be because the task was created with generalId but webhook sends id.")
                 
                 if executor:
                     status_name = task.get('status', {}).get('name', 'Unknown')
