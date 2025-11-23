@@ -185,7 +185,17 @@ class PlanfixWebhookHandler:
             # Преобразуем task_id и project_id в int, если это строки
             try:
                 task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
-                project_id = int(project_id_raw) if isinstance(project_id_raw, str) else project_id_raw
+                # project_id может быть строкой "Без проекта" или другим нечисловым значением
+                if isinstance(project_id_raw, str):
+                    # Пытаемся преобразовать в число, если не получается - пропускаем задачу
+                    try:
+                        project_id = int(project_id_raw)
+                    except (ValueError, TypeError):
+                        # Если project_id не число (например, "Без проекта"), пропускаем задачу
+                        logger.debug(f"Skipping task {task_id}: project_id is not a number ({project_id_raw})")
+                        return
+                else:
+                    project_id = project_id_raw
             except (ValueError, TypeError):
                 logger.warning(f"Invalid task_id or project_id format: task_id={task_id_raw}, project_id={project_id_raw}")
                 return

@@ -848,18 +848,36 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
             logger.error(f"Error creating Planfix contact for executor {callback_query.from_user.id}: {e}", exc_info=True)
             # Продолжаем регистрацию даже если не удалось создать контакт
         
-        # Сохраняем профиль исполнителя
-        executor = await db_manager.create_executor_profile(
-            telegram_id=callback_query.from_user.id,
-            full_name=user_data['full_name'],
-            phone_number=user_data['phone_number'],
-            serving_franchise_groups=selected_concepts,
-            position_role=user_data.get('position_role'),
-            profile_status="ожидает подтверждения",
-            serving_restaurants=serving_restaurants_payload,
-            service_direction=direction,
-            planfix_user_id=planfix_contact_id  # Сохраняем ID контакта как planfix_user_id (будет обновлен при подтверждении)
-        )
+        # Проверяем, существует ли уже профиль исполнителя
+        existing_executor = await db_manager.get_executor_profile(callback_query.from_user.id)
+        
+        if existing_executor:
+            # Обновляем существующий профиль
+            logger.info(f"Updating existing executor profile for {callback_query.from_user.id}")
+            executor = await db_manager.update_executor_profile(
+                callback_query.from_user.id,
+                full_name=user_data['full_name'],
+                phone_number=user_data['phone_number'],
+                serving_franchise_groups=selected_concepts,
+                position_role=user_data.get('position_role'),
+                profile_status="ожидает подтверждения",
+                serving_restaurants=serving_restaurants_payload,
+                service_direction=direction,
+                planfix_user_id=planfix_contact_id  # Сохраняем ID контакта как planfix_user_id (будет обновлен при подтверждении)
+            )
+        else:
+            # Создаем новый профиль
+            executor = await db_manager.create_executor_profile(
+                telegram_id=callback_query.from_user.id,
+                full_name=user_data['full_name'],
+                phone_number=user_data['phone_number'],
+                serving_franchise_groups=selected_concepts,
+                position_role=user_data.get('position_role'),
+                profile_status="ожидает подтверждения",
+                serving_restaurants=serving_restaurants_payload,
+                service_direction=direction,
+                planfix_user_id=planfix_contact_id  # Сохраняем ID контакта как planfix_user_id (будет обновлен при подтверждении)
+            )
         
         # Создаем задачу в Planfix для подтверждения регистрации (по ТЗ)
         concept_names = [FRANCHISE_GROUPS[cid]["name"] for cid in selected_concepts]
@@ -928,11 +946,12 @@ async def executor_finalize_registration(callback_query: CallbackQuery, state: F
                 task_id = task_response.get('id') or task_response.get('task', {}).get('id')
                 logger.info(f"Created Planfix task {task_id} for executor registration {callback_query.from_user.id}")
                 
-                # Сохраняем ID задачи в профиле исполнителя
+                # Сохраняем ID задачи в профиле исполнителя (обновляем существующий профиль)
                 await db_manager.update_executor_profile(
                     callback_query.from_user.id,
                     registration_task_id=task_id
                 )
+                logger.info(f"Saved registration_task_id={task_id} to executor profile {callback_query.from_user.id}")
                 
                 # Добавляем задачу в отслеживание polling сервиса
                 # Это нужно для автоматического отслеживания изменений статуса
