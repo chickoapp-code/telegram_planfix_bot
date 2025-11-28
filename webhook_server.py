@@ -709,11 +709,11 @@ class PlanfixWebhookHandler:
             # Пробуем использовать generalId вместо id для запроса задачи
             # Иногда API не принимает id, но принимает generalId
             task_response = None
-        try:
-            task_response = await planfix_client.get_task_by_id(
-                task_id,
-                fields="id,name,description,customFieldData,comments,assignees"
-            )
+            try:
+                task_response = await planfix_client.get_task_by_id(
+                    task_id,
+                    fields="id,name,description,customFieldData,comments,assignees"
+                )
             except Exception as api_err:
                 logger.warning(f"Failed to get task {task_id} by id, error: {api_err}")
                 # Если не получилось по id, пробуем найти через другие методы
