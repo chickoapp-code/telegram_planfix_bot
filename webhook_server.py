@@ -556,9 +556,9 @@ class PlanfixWebhookHandler:
                 for user in assignee_users:
                     # Проверяем, что user - это словарь
                     if isinstance(user, dict):
-                    user_id = self._normalize_user_id(user.get('id'))
-                    if user_id:
-                        assigned_user_ids.add(user_id)
+                        user_id = self._normalize_user_id(user.get('id'))
+                        if user_id:
+                            assigned_user_ids.add(user_id)
                     elif isinstance(user, str):
                         # Если user - это строка, пытаемся нормализовать её как ID
                         user_id = self._normalize_user_id(user)
