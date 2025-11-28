@@ -790,7 +790,7 @@ class PlanfixWebhookHandler:
                             if match:
                                 planfix_user_id = match.group(1)
                                 logger.info(f"Found planfix_user_id {planfix_user_id} in task comment JSON")
-                        return planfix_user_id
+                                return planfix_user_id
             
             return None
         except Exception as e:
