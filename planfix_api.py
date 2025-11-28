@@ -747,7 +747,7 @@ class PlanfixAPIClient:
         if status_id is not None:
             # Передаем status_id только если он не None
             try:
-            task_data["status"] = {"id": int(status_id)}
+                task_data["status"] = {"id": int(status_id)}
             except (ValueError, TypeError) as e:
                 logger.warning(f"Invalid status_id format: {status_id}, error: {e}. Creating task without status.")
         if tags:
