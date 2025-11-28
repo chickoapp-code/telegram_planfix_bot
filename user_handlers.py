@@ -1036,276 +1036,77 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             
             # Создаем задачу
             logger.info(f"Creating task with template {template_id} for user {user_id}")
-            logger.info(f"Custom field data to be sent ({len(custom_field_data)} fields): {json.dumps(custom_field_data, ensure_ascii=False, indent=2)}")
             
             # ВАЖНО: counterparty_id должен быть ID контакта, который является контрагентом (заказчиком)
             # В нашем случае это restaurant_contact_id - контакт ресторана, который создал заявку
-            logger.info(f"Creating task with counterparty_id={int(user.restaurant_contact_id)} for user {user_id}")
             template_direction = get_template_direction(template_id)
             task_tag = get_direction_tag(template_direction)
             
-            # ВАЖНО: Planfix может игнорировать customFieldData при создании через шаблон
-            # Попробуем создать задачу сначала с кастомными полями, если не получится - без них
+            # ОПТИМИЗАЦИЯ: Создаем задачу с минимальными обязательными полями, затем обновляем остальные
+            # Это быстрее, чем множественные попытки с разными вариантами
             create_response = None
+            
+            # Формируем обязательное поле (мобильный телефон) для шаблона
+            required_fields_only = [
+                {
+                    "field": {"id": CUSTOM_FIELD_MOBILE_PHONE_ID},
+                    "value": user.phone_number
+                }
+            ]
+            
             try:
-                # Пробуем создать задачу со всеми полями
+                # Создаем задачу с обязательными полями (быстрее и надежнее)
                 create_response = await planfix_client.create_task(
                     name=task_name,
                     description=task_description,
                     template_id=template_id,
-                    counterparty_id=int(user.restaurant_contact_id),  # Явно преобразуем в int
-                    custom_field_data=custom_field_data if custom_field_data else None,
-                    files=files,
-                    tags=None  # Теги отключены - вызывают ошибки 400
+                    counterparty_id=int(user.restaurant_contact_id),
+                    custom_field_data=required_fields_only,
+                    files=None,  # Файлы добавим после создания
+                    tags=None
                 )
             except Exception as e:
-                # Если ошибка 400 (Bad Request), пробуем создать без customFieldData
-                error_str = str(e).lower()
-                is_bad_request = (
-                    "400" in error_str or 
-                    "bad request" in error_str
-                )
-                
-                if is_bad_request:
-                    logger.warning(f"Error 400 when creating task with customFieldData: {e}")
-                    logger.warning("Trying to create task with required fields only (mobile phone)...")
-                    try:
-                        # Шаблон требует обязательное поле 88 (мобильный телефон)
-                        # Создаем задачу только с обязательным полем для шаблона
-                        required_fields_only = [
-                            {
-                                "field": {"id": CUSTOM_FIELD_MOBILE_PHONE_ID},
-                                "value": user.phone_number  # Обязательное поле для шаблона (строка)
-                            }
-                        ]
-                        create_response = await planfix_client.create_task(
-                            name=task_name,
-                            description=task_description,
-                            template_id=template_id,
-                            counterparty_id=int(user.restaurant_contact_id),  # Передаем counterparty
-                            custom_field_data=required_fields_only,  # Только обязательное поле
-                            files=None,  # Не передаем files при создании
-                            tags=None  # Теги отключены - вызывают ошибки 400
-                        )
-                        # Если задача создана, обновим остальные поля отдельными запросами
-                        if create_response and create_response.get('result') == 'success':
-                            task_id = create_response.get('id') or create_response.get('task', {}).get('id')
-                            if task_id:
-                                logger.info(f"Task {task_id} created with required fields, updating other fields...")
-                                
-                                # Обновляем все остальные поля одним запросом (кроме обязательного поля 88, которое уже установлено)
-                                # Формируем кастомные поля без обязательного поля 88
-                                remaining_custom_fields = [
-                                    field for field in custom_field_data 
-                                    if field.get("field", {}).get("id") != CUSTOM_FIELD_MOBILE_PHONE_ID
-                                ]
-                                
-                                # Обновляем все поля одним запросом
-                                update_kwargs = {}
-                                if user.restaurant_contact_id:
-                                    update_kwargs["counterparty"] = {"id": int(user.restaurant_contact_id)}
-                                if files:
-                                    update_kwargs["files"] = files
-                                # Теги отключены - вызывают ошибки 400
-                                # if task_tag:
-                                #     update_kwargs["tags"] = [{"name": task_tag}]
-                                if remaining_custom_fields:
-                                    update_kwargs["custom_field_data"] = remaining_custom_fields
-                                
-                                if update_kwargs:
-                                    try:
-                                        await planfix_client.update_task(task_id, **update_kwargs)
-                                        logger.info(f"All remaining fields updated for task {task_id}")
-                                    except Exception as update_error:
-                                        logger.error(f"Failed to update remaining fields for task {task_id}: {update_error}")
-                                        # Пробуем обновить поля по отдельности
-                                        if user.restaurant_contact_id:
-                                            try:
-                                                await planfix_client.update_task(
-                                                    task_id,
-                                                    counterparty={"id": int(user.restaurant_contact_id)}
-                                                )
-                                            except Exception as e:
-                                                logger.error(f"Failed to update counterparty separately: {e}")
-                                        if files:
-                                            try:
-                                                await planfix_client.update_task(task_id, files=files)
-                                            except Exception as e:
-                                                logger.error(f"Failed to update files separately: {e}")
-                                        if remaining_custom_fields:
-                                            try:
-                                                await planfix_client.update_task(
-                                                    task_id,
-                                                    custom_field_data=remaining_custom_fields
-                                                )
-                                            except Exception as e:
-                                                logger.error(f"Failed to update custom fields separately: {e}")
-                        else:
-                            # Если минимальный запрос тоже не работает, пробуем только name и description
-                            logger.warning("Minimal request failed, trying with only name and description...")
-                            create_response = await planfix_client.create_task(
-                                name=task_name,
-                                description=task_description,
-                                template_id=None,  # Без шаблона
-                                counterparty_id=None,
-                                custom_field_data=None,
-                                files=None,
-                                tags=None
-                            )
-                    except Exception as fallback_error:
-                        logger.error(f"Failed to create task even with minimal fields: {fallback_error}")
-                        # Пробуем еще более простой вариант - только name и description
-                        try:
-                            logger.warning("Trying with only name and description (no template)...")
-                            create_response = await planfix_client.create_task(
-                                name=task_name,
-                                description=task_description,
-                                template_id=None,
-                                counterparty_id=None,
-                                custom_field_data=None,
-                                files=None,
-                                tags=None
-                            )
-                        except Exception as simple_error:
-                            logger.error(f"Even simple request failed: {simple_error}")
-                            raise e  # Выбрасываем оригинальную ошибку
-                        # Если задача создана, обновим все поля отдельным запросом
-                        if create_response and create_response.get('result') == 'success':
-                            task_id = create_response.get('id') or create_response.get('task', {}).get('id')
-                            if task_id:
-                                logger.info(f"Task {task_id} created without template, updating all fields (template, counterparty, tags, custom fields)...")
-                                try:
-                                    # Обновляем все поля: template, counterparty, tags, custom fields, files
-                                    update_kwargs = {}
-                                    
-                                    # Устанавливаем правильный шаблон
-                                    if template_id:
-                                        update_kwargs["template"] = {"id": template_id}
-                                    
-                                    # Устанавливаем counterparty
-                                    if user.restaurant_contact_id:
-                                        update_kwargs["counterparty"] = {"id": int(user.restaurant_contact_id)}
-                                    
-                                    # Устанавливаем теги (убрано - вызывает ошибки 400)
-                                    # if task_tag:
-                                    #     update_kwargs["tags"] = [{"name": task_tag}]
-                                    
-                                    # Устанавливаем кастомные поля
-                                    if custom_field_data:
-                                        update_kwargs["custom_field_data"] = custom_field_data
-                                    
-                                    # Устанавливаем файлы
-                                    if files:
-                                        update_kwargs["files"] = files
-                                    
-                                    if update_kwargs:
-                                        await planfix_client.update_task(task_id, **update_kwargs)
-                                        logger.info(f"✅ All fields updated for task {task_id} (template={template_id}, counterparty={user.restaurant_contact_id})")
-                                    else:
-                                        logger.warning(f"No fields to update for task {task_id}")
-                                except Exception as update_error:
-                                    logger.error(f"Failed to update fields for task {task_id}: {update_error}", exc_info=True)
-                                    # Пробуем обновить поля по отдельности
-                                    try:
-                                        if template_id:
-                                            await planfix_client.update_task(task_id, template={"id": template_id})
-                                            logger.info(f"Template updated for task {task_id}")
-                                    except Exception as e:
-                                        logger.error(f"Failed to update template separately: {e}")
-                                    try:
-                                        if user.restaurant_contact_id:
-                                            await planfix_client.update_task(task_id, counterparty={"id": int(user.restaurant_contact_id)})
-                                            logger.info(f"Counterparty updated for task {task_id}")
-                                    except Exception as e:
-                                        logger.error(f"Failed to update counterparty separately: {e}")
-                                    # Установка тегов отключена - вызывает ошибки 400
-                                    # try:
-                                    #     if task_tag:
-                                    #         await planfix_client.update_task(task_id, tags=[{"name": task_tag}])
-                                    #         logger.info(f"Tags updated for task {task_id}")
-                                    # except Exception as e:
-                                    #     logger.warning(f"Failed to update tags separately for task {task_id}: {e}")
-                                    try:
-                                        if custom_field_data:
-                                            await planfix_client.update_task(task_id, custom_field_data=custom_field_data)
-                                            logger.info(f"Custom fields updated for task {task_id}")
-                                    except Exception as e:
-                                        logger.error(f"Failed to update custom fields separately: {e}")
-                                    try:
-                                        if files:
-                                            await planfix_client.update_task(task_id, files=files)
-                                            logger.info(f"Files updated for task {task_id}")
-                                    except Exception as e:
-                                        logger.error(f"Failed to update files separately: {e}")
-                    except Exception as fallback_error:
-                        logger.error(f"Failed to create task even without customFieldData: {fallback_error}")
-                        raise e  # Выбрасываем оригинальную ошибку
-                else:
-                    raise
-            
-            logger.info(f"Create task response: {json.dumps(create_response, ensure_ascii=False, indent=2) if create_response else 'None'}")
+                logger.error(f"Failed to create task: {e}", exc_info=True)
+                raise
             
             if create_response and create_response.get('result') == 'success':
                 task_id = create_response.get('id') or create_response.get('task', {}).get('id')
                 logger.info(f"Task {task_id} created successfully")
                 
-                # Проверяем, что шаблон правильно установлен (если задача создавалась без шаблона)
-                # Ждем немного, чтобы Planfix обработал обновления
-                if template_id:
+                # ОПТИМИЗАЦИЯ: Обновляем все остальные поля одним запросом (быстрее, чем множественные попытки)
+                # Формируем кастомные поля без обязательного поля 88 (мобильный телефон), которое уже установлено
+                remaining_custom_fields = [
+                    field for field in custom_field_data 
+                    if field.get("field", {}).get("id") != CUSTOM_FIELD_MOBILE_PHONE_ID
+                ]
+                
+                # Обновляем все поля одним запросом
+                update_kwargs = {}
+                if remaining_custom_fields:
+                    update_kwargs["custom_field_data"] = remaining_custom_fields
+                if files:
+                    update_kwargs["files"] = files
+                
+                if update_kwargs:
                     try:
-                        await asyncio.sleep(0.5)  # Небольшая задержка для обработки Planfix
-                        task_check = await planfix_client.get_task_by_id(
-                            task_id,
-                            fields="id,template.id,tags"
-                        )
-                        if task_check and task_check.get('result') == 'success':
-                            task_obj_check = task_check.get('task', {}) or {}
-                            current_template = task_obj_check.get('template', {}) or {}
-                            current_template_id = current_template.get('id')
-                            
-                            # Нормализуем template_id
-                            if isinstance(current_template_id, str) and ':' in current_template_id:
-                                current_template_id = int(current_template_id.split(':')[-1])
-                            elif isinstance(current_template_id, (int, float)):
-                                current_template_id = int(current_template_id)
-                            else:
-                                current_template_id = None
-                            
-                            if current_template_id == template_id:
-                                logger.info(f"✅ Verified: Task {task_id} has correct template {template_id}")
-                            else:
-                                logger.warning(f"⚠️ Task {task_id} template mismatch: expected {template_id}, got {current_template_id}. Retrying template update...")
-                                # Пробуем еще раз установить шаблон
-                                try:
-                                    await planfix_client.update_task(task_id, template={"id": template_id})
-                                    logger.info(f"✅ Template {template_id} re-applied to task {task_id}")
-                                except Exception as retry_err:
-                                    logger.error(f"Failed to re-apply template to task {task_id}: {retry_err}")
-                            
-                            # Проверяем теги
-                            current_tags = task_obj_check.get('tags', []) or []
-                            tag_names = []
-                            for tag in current_tags:
-                                if isinstance(tag, dict):
-                                    tag_name = tag.get('name', '')
-                                elif isinstance(tag, str):
-                                    tag_name = tag
-                                else:
-                                    tag_name = str(tag)
-                                if tag_name:
-                                    tag_names.append(tag_name)
-                            
-                            # Установка тегов отключена - вызывает ошибки 400
-                            # if task_tag and task_tag not in tag_names:
-                            #     logger.warning(f"⚠️ Task {task_id} missing tag '{task_tag}'. Current tags: {tag_names}. Retrying tag update...")
-                            #     try:
-                            #         all_tags = [{"name": t} for t in tag_names] + [{"name": task_tag}]
-                            #         await planfix_client.update_task(task_id, tags=all_tags)
-                            #         logger.info(f"✅ Tag '{task_tag}' added to task {task_id}")
-                            #     except Exception as tag_retry_err:
-                            #         logger.warning(f"Failed to add tag to task {task_id}: {tag_retry_err}")
-                    except Exception as verify_err:
-                        logger.debug(f"Could not verify template for task {task_id}: {verify_err}")
+                        await planfix_client.update_task(task_id, **update_kwargs)
+                        logger.info(f"✅ All remaining fields updated for task {task_id}")
+                    except Exception as update_error:
+                        logger.warning(f"Failed to update remaining fields for task {task_id}: {update_error}")
+                        # Пробуем обновить поля по отдельности (fallback)
+                        if remaining_custom_fields:
+                            try:
+                                await planfix_client.update_task(task_id, custom_field_data=remaining_custom_fields)
+                            except Exception as e:
+                                logger.error(f"Failed to update custom fields separately: {e}")
+                        if files:
+                            try:
+                                await planfix_client.update_task(task_id, files=files)
+                            except Exception as e:
+                                logger.error(f"Failed to update files separately: {e}")
+                
+                # ОПТИМИЗАЦИЯ: Убрана проверка задачи после создания (экономит 1-2 секунды)
+                # Если нужна проверка, можно включить опционально через флаг
                 
                 # Отправляем уведомление подходящим исполнителям о новой заявке
                 try:

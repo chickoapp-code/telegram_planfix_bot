@@ -33,3 +33,5 @@ export SYSTEMD_SERVICE=1
 echo "🚀 Запуск бота в режиме: $MODE"
 python3 run.py --mode "$MODE"
 
+
+

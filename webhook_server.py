@@ -20,6 +20,7 @@ from logging_config import setup_logging
 from notifications import NotificationService
 from planfix_client import planfix_client
 from services.status_registry import StatusKey, is_status, status_in
+from task_notification_service import TaskNotificationService
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class PlanfixWebhookHandler:
         self.bot = bot
         self.db_manager = DBManager()
         self.notification_service = NotificationService(bot)
+        self.task_notification_service = TaskNotificationService(bot)
         # Кэш для отслеживания предыдущих статусов задач
         self._task_status_cache = {}  # {task_id: status_id}
         # Кэш для предотвращения дубликатов событий
@@ -554,9 +556,9 @@ class PlanfixWebhookHandler:
                 for user in assignee_users:
                     # Проверяем, что user - это словарь
                     if isinstance(user, dict):
-                        user_id = self._normalize_user_id(user.get('id'))
-                        if user_id:
-                            assigned_user_ids.add(user_id)
+                    user_id = self._normalize_user_id(user.get('id'))
+                    if user_id:
+                        assigned_user_ids.add(user_id)
                     elif isinstance(user, str):
                         # Если user - это строка, пытаемся нормализовать её как ID
                         user_id = self._normalize_user_id(user)
@@ -636,7 +638,7 @@ class PlanfixWebhookHandler:
                         logger.info(f"Using planfix_contact_id {planfix_user_id} as planfix_user_id")
                     else:
                         # Пытаемся извлечь из задачи (fallback)
-                        planfix_user_id = await self._extract_planfix_user_id(task_id)
+                planfix_user_id = await self._extract_planfix_user_id(task_id)
                 
                 # Обновляем статус исполнителя
                 self.db_manager.update_executor_profile(
@@ -707,11 +709,11 @@ class PlanfixWebhookHandler:
             # Пробуем использовать generalId вместо id для запроса задачи
             # Иногда API не принимает id, но принимает generalId
             task_response = None
-            try:
-                task_response = await planfix_client.get_task_by_id(
-                    task_id,
-                    fields="id,name,description,customFieldData,comments,assignees"
-                )
+        try:
+            task_response = await planfix_client.get_task_by_id(
+                task_id,
+                fields="id,name,description,customFieldData,comments,assignees"
+            )
             except Exception as api_err:
                 logger.warning(f"Failed to get task {task_id} by id, error: {api_err}")
                 # Если не получилось по id, пробуем найти через другие методы
@@ -737,8 +739,8 @@ class PlanfixWebhookHandler:
                             # Проверяем, что это ID, а не имя
                             try:
                                 int(planfix_user_id)
-                                logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
-                                return planfix_user_id
+                            logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
+                            return planfix_user_id
                             except (ValueError, TypeError):
                                 # Это имя, пробуем найти по имени
                                 if assignee_name:
@@ -788,7 +790,7 @@ class PlanfixWebhookHandler:
                             if match:
                                 planfix_user_id = match.group(1)
                                 logger.info(f"Found planfix_user_id {planfix_user_id} in task comment JSON")
-                                return planfix_user_id
+                        return planfix_user_id
             
             return None
         except Exception as e:
@@ -813,6 +815,97 @@ class PlanfixWebhookHandler:
                 logger.info(f"Executor {telegram_id} rejected via webhook")
         except Exception as e:
             logger.error(f"Error rejecting executor: {e}", exc_info=True)
+    
+    async def handle_task_reminder(self, data: dict):
+        """
+        Обработка напоминания о задаче, которая еще не взята в работу.
+        Используется для повторной отправки уведомлений исполнителям.
+        """
+        try:
+            task = data.get('task', {})
+            task_id_raw = task.get('id')
+            
+            if not task_id_raw:
+                logger.warning(f"Incomplete task data in reminder webhook: {data}")
+                return
+            
+            # Преобразуем task_id в int, если это строка
+            try:
+                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid task_id format in reminder: {task_id_raw}")
+                return
+            
+            # Если в вебхуке недостаточно данных, получаем задачу через API
+            task_data_from_webhook = task
+            if not task.get('status') or not task.get('assignees'):
+                logger.debug(f"Task {task_id} reminder: fetching full task data from API")
+                try:
+                    task_response = await planfix_client.get_task_by_id(
+                        task_id,
+                        fields="id,status,assignees,process"
+                    )
+                    if task_response and task_response.get('result') == 'success':
+                        task_data_from_webhook = task_response.get('task', {})
+                        logger.debug(f"Task {task_id} reminder: got full task data from API")
+                    else:
+                        logger.warning(f"Task {task_id} reminder: failed to get task from API, using webhook data")
+                except Exception as api_err:
+                    logger.warning(f"Task {task_id} reminder: error fetching task from API: {api_err}, using webhook data")
+            
+            # Фильтруем только релевантные задачи
+            if not self._should_process_task(task_data_from_webhook):
+                logger.debug(f"Task {task_id} reminder skipped by filter")
+                return
+            
+            # Проверяем, что задача еще не взята в работу
+            # 1. Проверяем статус задачи
+            status_obj = task_data_from_webhook.get('status', {})
+            status_id_raw = (
+                status_obj.get('task.status.id') or 
+                status_obj.get('task.status.Идентификатор') or
+                status_obj.get('id')
+            )
+            status_id = self._normalize_status_id(status_id_raw)
+            
+            # Если статус не "Новая" или подобный, пропускаем
+            from services.status_registry import ensure_status_registry_loaded, get_status_id
+            await ensure_status_registry_loaded()
+            
+            new_status_id = get_status_id(StatusKey.NEW, required=False)
+            if status_id and new_status_id and status_id != new_status_id:
+                # Проверяем, не в работе ли задача
+                in_progress_id = get_status_id(StatusKey.IN_PROGRESS, required=False)
+                if status_id == in_progress_id:
+                    logger.info(f"Task {task_id} reminder skipped: task is already in progress (status_id={status_id})")
+                    return
+            
+            # 2. Проверяем наличие активных назначений в БД
+            with self.db_manager.get_db() as db:
+                from database import TaskAssignment
+                active_assignments = db.query(TaskAssignment).filter(
+                    TaskAssignment.task_id == task_id,
+                    TaskAssignment.status == "active"
+                ).count()
+                
+                if active_assignments > 0:
+                    logger.info(f"Task {task_id} reminder skipped: task has {active_assignments} active assignment(s)")
+                    return
+            
+            # 3. Проверяем назначенных исполнителей в Planfix
+            assignees = task_data_from_webhook.get('assignees', {})
+            assignee_users = assignees.get('users', []) if isinstance(assignees, dict) else []
+            
+            if assignee_users and len(assignee_users) > 0:
+                logger.info(f"Task {task_id} reminder skipped: task has {len(assignee_users)} assignee(s) in Planfix")
+                return
+            
+            # Задача не взята в работу - отправляем повторные уведомления
+            logger.info(f"🔔 Reminder for unassigned task {task_id} - resending notifications to executors")
+            await self.task_notification_service.notify_executors_about_new_task(task_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling task reminder: {e}", exc_info=True)
 
 
 async def webhook_handler(request):
@@ -1035,6 +1128,9 @@ async def webhook_handler(request):
             await handler.handle_task_updated(data)
         elif event_type == 'comment.create':
             await handler.handle_comment_added(data)
+        elif event_type == 'task.reminder' or event_type == 'task.remind':
+            # Обработка напоминаний о задачах, которые еще не взяты в работу
+            await handler.handle_task_reminder(data)
         else:
             logger.warning(f"Unknown event type: {event_type}")
         
