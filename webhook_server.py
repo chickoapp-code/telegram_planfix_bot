@@ -638,7 +638,7 @@ class PlanfixWebhookHandler:
                         logger.info(f"Using planfix_contact_id {planfix_user_id} as planfix_user_id")
                     else:
                         # Пытаемся извлечь из задачи (fallback)
-                planfix_user_id = await self._extract_planfix_user_id(task_id)
+                        planfix_user_id = await self._extract_planfix_user_id(task_id)
                 
                 # Обновляем статус исполнителя
                 self.db_manager.update_executor_profile(
