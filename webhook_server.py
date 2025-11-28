@@ -739,8 +739,8 @@ class PlanfixWebhookHandler:
                             # Проверяем, что это ID, а не имя
                             try:
                                 int(planfix_user_id)
-                            logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
-                            return planfix_user_id
+                                logger.info(f"Found planfix_user_id {planfix_user_id} from assignee in task {task_id}")
+                                return planfix_user_id
                             except (ValueError, TypeError):
                                 # Это имя, пробуем найти по имени
                                 if assignee_name:
