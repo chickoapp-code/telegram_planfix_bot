@@ -1709,27 +1709,47 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             f"desc_preview={task_desc}"
                         )
 
+                        # Фильтр по шаблонам (только если у исполнителя есть ограничения)
                         if allowed_templates:
                             if template_id is None or template_id not in allowed_templates:
-                                logger.warning(
-                                    f"Task {task_id} filtered out: template {template_id} not in {allowed_templates}"
+                                logger.info(
+                                    f"Task {task_id} filtered out by template filter: "
+                                    f"template_id={template_id} not in allowed_templates={allowed_templates}"
                                 )
                                 continue
+                        else:
+                            # Если allowed_templates пусто, значит исполнитель может видеть все шаблоны
+                            logger.debug(f"Task {task_id} passed template filter (no restrictions)")
 
+                        # Фильтр по ресторанам (только если у исполнителя есть ограничения)
                         if allowed_restaurant_ids:
                             if counterparty_id is None or counterparty_id not in allowed_restaurant_ids:
-                                logger.warning(
-                                    f"Task {task_id} filtered out: counterparty {counterparty_id} not in allowed_restaurant_ids (has {len(allowed_restaurant_ids)} restaurants)"
+                                logger.info(
+                                    f"Task {task_id} filtered out by restaurant filter: "
+                                    f"counterparty_id={counterparty_id} not in allowed_restaurant_ids={allowed_restaurant_ids} "
+                                    f"(executor has {len(allowed_restaurant_ids)} restaurants)"
                                 )
                                 continue
+                        else:
+                            # Если allowed_restaurant_ids пусто, значит исполнитель может видеть все рестораны
+                            logger.debug(f"Task {task_id} passed restaurant filter (no restrictions)")
 
                         seen_task_ids.add(task_id)
+                        
+                        # Фильтр по тегам (только если у задачи ЕСТЬ теги И у исполнителя есть ограничения)
                         if allowed_tag_names and task_tag_names:
                             if not (task_tag_names & allowed_tag_names):
-                                logger.warning(
-                                    f"Task {task_id} filtered out: tags {task_tag_names} not in {allowed_tag_names}"
+                                logger.info(
+                                    f"Task {task_id} filtered out by tag filter: "
+                                    f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
                                 )
                                 continue
+                        elif task_tag_names:
+                            # Если у задачи есть теги, но у исполнителя нет ограничений - пропускаем
+                            logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")
+                        else:
+                            # Если у задачи нет тегов - пропускаем фильтр по тегам
+                            logger.debug(f"Task {task_id} passed tag filter (task has no tags)")
 
                         logger.info(f"Task {task_id} passed all filters, adding to list")
                         all_new_tasks.append(task)
@@ -1751,32 +1771,102 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         break
                 
             # Фильтрация: показываем только заявки, созданные через бота
+            # Используем BotLog для более надежной проверки
             def _is_bot_task(t):
+                task_id = t.get('id')
+                if not task_id:
+                    return False
+                
+                # Нормализуем task_id
+                try:
+                    if isinstance(task_id, str) and ':' in task_id:
+                        task_id = int(task_id.split(':')[-1])
+                    else:
+                        task_id = int(task_id)
+                except (ValueError, TypeError):
+                    logger.warning(f"Task {task_id} has invalid id format")
+                    return False
+                
+                # ПРИОРИТЕТ 1: Проверяем BotLog (наиболее надежный способ)
+                try:
+                    with db_manager.get_db() as db:
+                        from database import BotLog
+                        # Ищем задачу в BotLog по task_id (может быть сохранен как id или generalId)
+                        bot_logs = db.query(BotLog).filter(
+                            BotLog.action == "create_task",
+                            BotLog.success == True
+                        ).order_by(BotLog.id.desc()).limit(500).all()
+                        
+                        for log in bot_logs:
+                            if log.details:
+                                try:
+                                    log_task_id = log.details.get('task_id')
+                                    if log_task_id is not None:
+                                        # Нормализуем ID из лога
+                                        log_task_id_int = None
+                                        if isinstance(log_task_id, int):
+                                            log_task_id_int = log_task_id
+                                        elif isinstance(log_task_id, str):
+                                            if ':' in log_task_id:
+                                                log_task_id_int = int(log_task_id.split(':')[-1])
+                                            else:
+                                                log_task_id_int = int(log_task_id)
+                                        
+                                        # Сравниваем с task_id из задачи
+                                        if log_task_id_int == task_id:
+                                            logger.debug(f"Task {task_id} found in BotLog - confirmed as bot task")
+                                            return True
+                                except (ValueError, TypeError, AttributeError):
+                                    continue
+                except Exception as log_err:
+                    logger.debug(f"Error checking BotLog for task {task_id}: {log_err}")
+                
+                # ПРИОРИТЕТ 2: Проверяем текст в названии и описании (fallback)
                 desc = t.get('description') or ''
                 name = t.get('name') or ''
-                # Проверяем наличие маркера "Создано через Telegram бот" в описании или "Запрос через бот" в имени (без учёта регистра)
                 desc_lower = desc.lower()
                 name_lower = name.lower()
                 is_bot = (
                     "создано через telegram бот" in desc_lower or 
                     "telegram бот" in desc_lower or 
-                    "запрос через бот" in name_lower
+                    "запрос через бот" in name_lower or
+                    "запрос через telegram бот" in name_lower
                 )
+                
                 if not is_bot:
                     logger.warning(
-                        f"Task {t.get('id')} filtered out: not a bot task "
+                        f"Task {task_id} filtered out: not a bot task "
                         f"(name='{name[:50]}', desc has 'telegram бот'={('telegram бот' in desc_lower)}, "
                         f"desc has 'создано через telegram бот'={('создано через telegram бот' in desc_lower)}, "
-                        f"name has 'запрос через бот'={('запрос через бот' in name_lower)})"
+                        f"name has 'запрос через бот'={('запрос через бот' in name_lower)}, "
+                        f"not found in BotLog)"
                     )
+                else:
+                    logger.debug(f"Task {task_id} confirmed as bot task by text markers")
+                
                 return is_bot
             
+            # Фильтрация по BotLog: показываем только заявки, созданные через бота
             before_bot_filter = len(all_new_tasks)
-            all_new_tasks = [t for t in all_new_tasks if _is_bot_task(t)]
+            filtered_tasks = []
+            for t in all_new_tasks:
+                if _is_bot_task(t):
+                    filtered_tasks.append(t)
+                else:
+                    logger.info(f"Task {t.get('id')} filtered out by _is_bot_task check")
+            
+            all_new_tasks = filtered_tasks
             logger.info(
                 f"Executor {executor.telegram_id} final filtered tasks: {len(all_new_tasks)} "
-                f"(before bot filter: {before_bot_filter})"
+                f"(before bot filter: {before_bot_filter}, filtered out: {before_bot_filter - len(all_new_tasks)})"
             )
+            
+            # Дополнительная диагностика: если задач нет, но были до фильтра бота
+            if not all_new_tasks and before_bot_filter > 0:
+                logger.warning(
+                    f"Executor {executor.telegram_id}: {before_bot_filter} tasks passed all filters "
+                    f"but were filtered out by _is_bot_task. This may indicate that tasks are not marked as bot tasks."
+                )
             
             # Дедупликация и ортировка по дате
             try:
@@ -1789,6 +1879,33 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 pass
 
             if not all_new_tasks:
+                # Детальная диагностика: проверяем, были ли задачи до фильтров
+                logger.warning(
+                    f"Executor {executor.telegram_id}: No tasks shown. "
+                    f"Filters applied: direction={executor.service_direction}, "
+                    f"allowed_templates={allowed_templates}, "
+                    f"allowed_restaurant_ids={allowed_restaurant_ids}, "
+                    f"allowed_tag_names={allowed_tag_names}, "
+                    f"working_status_ids={working_status_ids}"
+                )
+                
+                # Проверяем, есть ли задачи в BotLog для этого исполнителя
+                try:
+                    with db_manager.get_db() as db:
+                        from database import BotLog
+                        recent_bot_tasks = db.query(BotLog).filter(
+                            BotLog.action == "create_task",
+                            BotLog.success == True
+                        ).order_by(BotLog.id.desc()).limit(10).all()
+                        
+                        if recent_bot_tasks:
+                            logger.info(
+                                f"Found {len(recent_bot_tasks)} recent bot tasks in BotLog. "
+                                f"First task_id: {recent_bot_tasks[0].details.get('task_id') if recent_bot_tasks[0].details else 'N/A'}"
+                            )
+                except Exception as diag_err:
+                    logger.debug(f"Error in diagnostics: {diag_err}")
+                
                 await message.answer(
                     "📋 <b>Новых заявок нет.</b>\n\n"
                     "Все заявки по вашим концепциям обработаны.",
