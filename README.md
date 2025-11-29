@@ -56,6 +56,20 @@ DIRECTORY_RESTAURANTS_ID=123
 
 ## Запуск бота
 
+### Активация виртуального окружения
+
+Перед запуском необходимо активировать виртуальное окружение:
+
+```bash
+# Linux/macOS
+source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
+```
+
+### Запуск
+
 Бот запускается вместе с webhook сервером через `main.py`:
 
 ```bash
@@ -78,6 +92,18 @@ python main.py --webhook-host 0.0.0.0
 
 # Комбинация параметров
 python main.py --webhook-host 127.0.0.1 --webhook-port 8080
+```
+
+### Альтернативный запуск через скрипт
+
+Можно использовать скрипт `start_bot.sh`, который автоматически активирует виртуальное окружение:
+
+```bash
+# Linux/macOS
+./start_bot.sh
+
+# С параметрами
+./start_bot.sh --webhook-port 9000
 ```
 
 **Примечание:** Для production рекомендуется использовать systemd сервис (см. `install_service.sh`).
