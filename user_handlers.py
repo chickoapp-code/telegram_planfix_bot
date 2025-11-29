@@ -1042,11 +1042,10 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             template_direction = get_template_direction(template_id)
             task_tag = get_direction_tag(template_direction)
             
-            # Формируем теги для задачи (если определено направление)
-            task_tags = None
+            # Теги уже прописаны в шаблоне задачи в Planfix, поэтому не добавляем их через API
+            # Определяем тег только для логики бота (для фильтрации и уведомлений)
             if task_tag:
-                task_tags = [task_tag]  # Передаем как список строк
-                logger.info(f"Task will be created with tag: {task_tag} (direction: {template_direction})")
+                logger.info(f"Task template {template_id} has direction: {template_direction}, expected tag in Planfix: {task_tag} (not adding via API - tags are in template)")
             else:
                 logger.warning(f"No tag determined for template {template_id} (direction: {template_direction})")
             
@@ -1064,6 +1063,8 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             
             try:
                 # Создаем задачу с обязательными полями (быстрее и надежнее)
+                # ВАЖНО: Теги нельзя устанавливать при создании задачи (нет в TaskCreateRequest),
+                # поэтому создаем задачу без тегов, затем обновим её
                 create_response = await planfix_client.create_task(
                     name=task_name,
                     description=task_description,
@@ -1071,7 +1072,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     counterparty_id=int(user.restaurant_contact_id),
                     custom_field_data=required_fields_only,
                     files=None,  # Файлы добавим после создания
-                    tags=task_tags  # Передаем тег в зависимости от направления шаблона
+                    tags=None  # Теги добавим после создания через update_task
                 )
             except Exception as e:
                 logger.error(f"Failed to create task: {e}", exc_info=True)
@@ -1119,6 +1120,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 ]
                 
                 # Обновляем все поля одним запросом
+                # ВАЖНО: Теги не добавляем - они уже прописаны в шаблоне задачи в Planfix
                 update_kwargs = {}
                 if remaining_custom_fields:
                     update_kwargs["custom_field_data"] = remaining_custom_fields
@@ -1128,7 +1130,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 if update_kwargs:
                     try:
                         await planfix_client.update_task(task_id, **update_kwargs)
-                        logger.info(f"✅ All remaining fields updated for task {task_id}")
+                        logger.info(f"✅ All remaining fields updated for task {task_id} (tags are in template, not added via API)")
                     except Exception as update_error:
                         logger.warning(f"Failed to update remaining fields for task {task_id}: {update_error}")
                         # Пробуем обновить поля по отдельности (fallback)
