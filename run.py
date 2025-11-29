@@ -287,7 +287,7 @@ def setup_signal_handlers():
 
 
 if __name__ == "__main__":
-    # Настраиваем обработчики сигналов только в Linux
+    # Настраиваем обработчики сигналов только и в Linux
     if sys.platform != 'win32':
         try:
             setup_signal_handlers()
