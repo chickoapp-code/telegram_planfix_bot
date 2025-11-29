@@ -39,7 +39,7 @@ class PlanfixWebhookHandler:
         self._processed_events = set()  # {(event_type, task_id, timestamp)}
     
     async def check_pending_registration_tasks(self):
-        """Проверяет все незавершенные задачи регистрации при старте."""
+        """Проверяет все незавершенные задачи регистрации при старте. да"""
         try:
             logger.info("Checking pending registration tasks on startup...")
             
