@@ -297,11 +297,20 @@ class TaskNotificationService:
                         continue
                 
                 # Фильтр 3: Теги задачи должны пересекаться с разрешенными тегами исполнителя
-                # (только если у задачи есть теги, иначе пропускаем этот фильтр)
+                # ВАЖНО: Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь соответствующий тег
                 allowed_tags = _get_allowed_tags(executor)
                 allowed_tag_names = {tag.lower() for tag in allowed_tags if isinstance(tag, str)}
-                if allowed_tag_names and task_tags:
-                    if not (task_tags & allowed_tag_names):
+                if allowed_tag_names:
+                    # Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь один из разрешенных тегов
+                    if not task_tags:
+                        # У задачи нет тегов, но у исполнителя есть ограничения - отфильтровываем
+                        logger.debug(
+                            f"Executor {executor.telegram_id} filtered out: "
+                            f"task has no tags, but executor requires tags: {allowed_tag_names}"
+                        )
+                        continue
+                    elif not (task_tags & allowed_tag_names):
+                        # У задачи есть теги, но они не совпадают с разрешенными
                         logger.debug(
                             f"Executor {executor.telegram_id} filtered out: "
                             f"task tags {task_tags} don't match allowed tags {allowed_tag_names}"

@@ -1498,13 +1498,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 f"serving_restaurants={executor.serving_restaurants}"
             )
 
+            # Показываем только задачи со статусом "Новая"
             working_status_ids = collect_status_ids(
-                (
-                    StatusKey.DRAFT,
-                    StatusKey.NEW,
-                    StatusKey.REPLY_RECEIVED,
-                    StatusKey.TIMEOUT,
-                ),
+                (StatusKey.NEW,),
                 required=False,
             )
             if not working_status_ids:
@@ -1755,21 +1751,15 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         )
 
                         # Фильтр по шаблонам (только если у исполнителя есть ограничения)
-                        # ИСКЛЮЧЕНИЕ: задачи, созданные через бота, пропускают фильтр по шаблонам
+                        # ВАЖНО: Фильтр применяется ВСЕГДА, даже для задач из BotLog
                         if allowed_templates:
                             if template_id is None or template_id not in allowed_templates:
-                                # Если задача создана через бота, пропускаем фильтр по шаблонам
-                                if is_bot_task_verified:
-                                    logger.debug(
-                                        f"Task {task_id} has template_id={template_id} not in allowed_templates={allowed_templates}, "
-                                        f"but is verified as bot-created, skipping template filter"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Task {task_id} filtered out by template filter: "
-                                        f"template_id={template_id} not in allowed_templates={allowed_templates}"
-                                    )
-                                    continue
+                                logger.info(
+                                    f"Task {task_id} filtered out by template filter: "
+                                    f"template_id={template_id} not in allowed_templates={allowed_templates} "
+                                    f"(is_bot_task={is_bot_task_verified})"
+                                )
+                                continue
                         else:
                             # Если allowed_templates пусто, значит исполнитель может видеть все шаблоны
                             logger.debug(f"Task {task_id} passed template filter (no restrictions)")
@@ -1789,20 +1779,28 @@ async def show_new_tasks(message: Message, state: FSMContext):
 
                         seen_task_ids.add(task_id)
                         
-                        # Фильтр по тегам (только если у задачи ЕСТЬ теги И у исполнителя есть ограничения)
-                        if allowed_tag_names and task_tag_names:
-                            if not (task_tag_names & allowed_tag_names):
+                        # Фильтр по тегам: если у исполнителя есть ограничения, задача ДОЛЖНА иметь соответствующий тег
+                        if allowed_tag_names:
+                            # Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь один из разрешенных тегов
+                            if not task_tag_names:
+                                # У задачи нет тегов, но у исполнителя есть ограничения - отфильтровываем
+                                logger.info(
+                                    f"Task {task_id} filtered out by tag filter: "
+                                    f"task has no tags, but executor requires tags: {allowed_tag_names}"
+                                )
+                                continue
+                            elif not (task_tag_names & allowed_tag_names):
+                                # У задачи есть теги, но они не совпадают с разрешенными
                                 logger.info(
                                     f"Task {task_id} filtered out by tag filter: "
                                     f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
                                 )
                                 continue
-                        elif task_tag_names:
-                            # Если у задачи есть теги, но у исполнителя нет ограничений - пропускаем
-                            logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")
+                            else:
+                                logger.debug(f"Task {task_id} passed tag filter: task_tags={task_tag_names} match allowed_tags={allowed_tag_names}")
                         else:
-                            # Если у задачи нет тегов - пропускаем фильтр по тегам
-                            logger.debug(f"Task {task_id} passed tag filter (task has no tags)")
+                            # Если у исполнителя нет ограничений по тегам - пропускаем фильтр
+                            logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")
 
                         logger.info(f"Task {task_id} passed all filters, adding to list")
                         all_new_tasks.append(task)

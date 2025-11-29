@@ -961,19 +961,60 @@ class PlanfixWebhookHandler:
                 return
             
             # Если в вебхуке недостаточно данных (только id), получаем задачу через API
-            # Согласно PLANFIX_REMINDER_WEBHOOK_EXAMPLE.json, webhook может содержать только task.id
+            # ВАЖНО: В настройках Planfix webhook должен содержать:
+            # - {{Задача.Шаблон.Идентификатор}} (template.id)
+            # - {{Задача.Номер}} (generalId или id)
+            # - {{Задача.Теги}} (tags)
             task_data_from_webhook = task
-            needs_full_data = not task.get('status') or not task.get('assignees')
+            
+            # Извлекаем данные из webhook (если они есть)
+            template_id_from_webhook = None
+            task_number_from_webhook = None
+            tags_from_webhook = None
+            
+            # Пытаемся извлечь шаблон из webhook
+            template_obj = task.get('template') or task.get('task.template') or {}
+            if isinstance(template_obj, dict):
+                template_id_from_webhook = self._normalize_int(template_obj.get('id'))
+            elif isinstance(template_obj, (int, str)):
+                template_id_from_webhook = self._normalize_int(template_obj)
+            
+            # Пытаемся извлечь номер задачи из webhook
+            task_number_from_webhook = task.get('generalId') or task.get('number') or task.get('task.number')
+            
+            # Пытаемся извлечь теги из webhook
+            tags_from_webhook = task.get('tags') or task.get('task.tags') or []
+            
+            logger.info(
+                f"Task {task_id} reminder webhook data: "
+                f"template_id={template_id_from_webhook}, "
+                f"task_number={task_number_from_webhook}, "
+                f"tags={tags_from_webhook}, "
+                f"has_status={bool(task.get('status'))}, "
+                f"has_assignees={bool(task.get('assignees'))}"
+            )
+            
+            needs_full_data = not task.get('status') or not task.get('assignees') or not template_id_from_webhook
             
             if needs_full_data:
-                logger.debug(f"Task {task_id} reminder: fetching full task data from API (webhook contains only id)")
+                logger.debug(f"Task {task_id} reminder: fetching full task data from API (webhook missing some fields)")
                 try:
+                    # Запрашиваем все необходимые поля, включая шаблон, теги и номер
                     task_response = await planfix_client.get_task_by_id(
                         task_id,
-                        fields="id,status,assignees,process,project"
+                        fields="id,generalId,status,assignees,process,project,template.id,tags"
                     )
                     if task_response and task_response.get('result') == 'success':
                         task_data_from_webhook = task_response.get('task', {})
+                        # Обновляем данные из API, если их не было в webhook
+                        if not template_id_from_webhook:
+                            template_obj = task_data_from_webhook.get('template', {})
+                            if isinstance(template_obj, dict):
+                                template_id_from_webhook = self._normalize_int(template_obj.get('id'))
+                        if not task_number_from_webhook:
+                            task_number_from_webhook = task_data_from_webhook.get('generalId') or task_data_from_webhook.get('id')
+                        if not tags_from_webhook:
+                            tags_from_webhook = task_data_from_webhook.get('tags', [])
                         logger.debug(f"Task {task_id} reminder: got full task data from API")
                     else:
                         logger.warning(f"Task {task_id} reminder: failed to get task from API, using webhook data")
