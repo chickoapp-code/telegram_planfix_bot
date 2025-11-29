@@ -1131,6 +1131,8 @@ class PlanfixWebhookHandler:
 async def webhook_handler(request):
     """Обработчик входящих webhook от Planfix."""
     try:
+        # Логируем ВСЕ входящие запросы на самом раннем этапе
+        logger.info(f"🌐 Webhook request received: {request.method} {request.path_qs}, headers: {dict(request.headers)}")
         # Проверка HTTP Basic Authentication (если настроены логин и пароль)
         if PLANFIX_WEBHOOK_USERNAME and PLANFIX_WEBHOOK_PASSWORD:
             import base64
@@ -1197,6 +1199,11 @@ async def webhook_handler(request):
         
         # Логируем информацию о запросе
         logger.info(f"Received webhook: method={request.method}, content_type={content_type}, body_length={len(raw_body)}")
+        
+        # Логируем первые 200 символов тела запроса для отладки
+        if raw_body:
+            body_preview = raw_body.decode('utf-8', errors='ignore')[:200]
+            logger.debug(f"Webhook body preview: {body_preview}")
         
         # Пытаемся распарсить данные в зависимости от Content-Type
         data = {}
@@ -1342,6 +1349,9 @@ async def webhook_handler(request):
         
         handler = request.app['webhook_handler']
         event_type = data.get('event')
+        
+        # Логируем тип события для всех webhook
+        logger.info(f"📥 Webhook event type: '{event_type}' (data keys: {list(data.keys()) if data else 'no data'})")
         
         if not event_type:
             logger.warning(f"Webhook received without event type. Data keys: {list(data.keys())}")
