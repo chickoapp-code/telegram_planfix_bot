@@ -1070,8 +1070,38 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 raise
             
             if create_response and create_response.get('result') == 'success':
-                task_id = create_response.get('id') or create_response.get('task', {}).get('id')
-                logger.info(f"Task {task_id} created successfully")
+                # create_task возвращает generalId в поле id
+                task_id_general = create_response.get('id') or create_response.get('task', {}).get('id')
+                logger.info(f"Task created successfully, generalId: {task_id_general}")
+                
+                # Пытаемся получить внутренний id задачи
+                task_id_internal = None
+                try:
+                    # Запрашиваем задачу по generalId, чтобы получить внутренний id
+                    task_info = await planfix_client.get_task_by_id(
+                        task_id_general,
+                        fields="id,generalId"
+                    )
+                    if task_info and task_info.get('result') == 'success':
+                        task_obj = task_info.get('task', {})
+                        # API может вернуть generalId в поле id, поэтому проверяем оба
+                        returned_id = task_obj.get('id')
+                        returned_general_id = task_obj.get('generalId')
+                        
+                        # Если id != generalId, значит id - это внутренний id
+                        if returned_id and returned_general_id and str(returned_id) != str(returned_general_id):
+                            task_id_internal = int(returned_id)
+                            logger.info(f"✅ Found internal task_id: {task_id_internal}, generalId: {returned_general_id}")
+                        else:
+                            # Если совпадают или generalId отсутствует, используем id как внутренний
+                            task_id_internal = int(returned_id) if returned_id else None
+                            logger.info(f"⚠️ Using returned id as internal: {task_id_internal}")
+                except Exception as id_err:
+                    logger.warning(f"Could not get internal task_id: {id_err}, will use generalId")
+                
+                # Используем internal id если есть, иначе generalId
+                task_id = task_id_internal if task_id_internal else task_id_general
+                logger.info(f"Using task_id: {task_id} (internal: {task_id_internal}, general: {task_id_general})")
                 
                 # ОПТИМИЗАЦИЯ: Обновляем все остальные поля одним запросом (быстрее, чем множественные попытки)
                 # Формируем кастомные поля без обязательного поля 88 (мобильный телефон), которое уже установлено
@@ -1328,14 +1358,24 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                         logger.error(f"❌ Error adding files to task {task_id}: {files_err}", exc_info=True)
                 
                 # Сохраняем привязку task_id -> telegram_id для последующих уведомлений
+                # Сохраняем оба ID для совместимости с разными форматами
                 try:
+                    bot_log_details = {
+                        "task_id": int(task_id),  # Основной ID (для совместимости)
+                        "user_telegram_id": int(user_id),
+                    }
+                    # Сохраняем оба ID если они разные
+                    if task_id_internal and task_id_general and task_id_internal != task_id_general:
+                        bot_log_details["task_id_internal"] = int(task_id_internal)
+                        bot_log_details["task_id_general"] = int(task_id_general)
+                        logger.info(f"✅ Saved both IDs in BotLog: internal={task_id_internal}, general={task_id_general}")
+                    elif task_id_general:
+                        bot_log_details["task_id_general"] = int(task_id_general)
+                    
                     await db_manager.create_bot_log(
                         telegram_id=user_id,
                         action="create_task",
-                        details={
-                            "task_id": int(task_id),
-                            "user_telegram_id": int(user_id),
-                        },
+                        details=bot_log_details,
                     )
                 except Exception as log_err:
                     logger.warning(f"Failed to write BotLog for task {task_id}: {log_err}")

@@ -4,8 +4,8 @@
 
 ## Структура проекта
 
-- `main.py` — точка входа бота (polling).
-- `webhook_server.py` — вспомогательный сервер для приёма webhook'ов Planfix (опционально).
+- `main.py` — точка входа для запуска бота (polling) и webhook сервера одновременно.
+- `webhook_server.py` — сервер для приёма webhook'ов от Planfix.
 - `user_handlers.py`, `executor_handlers.py` — обработчики пользовательских сценариев.
 - `planfix_api.py`, `planfix_client.py` — асинхронный клиент Planfix.
 - `planfix_sync.py` — сервис периодического опроса Planfix.
@@ -56,15 +56,31 @@ DIRECTORY_RESTAURANTS_ID=123
 
 ## Запуск бота
 
+Бот запускается вместе с webhook сервером через `main.py`:
+
 ```bash
 python main.py
 ```
 
-При необходимости можно запускать webhook-сервер:
+Логи отображаются в реальном времени в консоли.
+
+### Параметры запуска
 
 ```bash
-python webhook_server.py
+# Запуск с настройками по умолчанию (webhook на 127.0.0.1:8080)
+python main.py
+
+# Указать порт webhook
+python main.py --webhook-port 9000
+
+# Указать хост webhook (0.0.0.0 для доступа извне)
+python main.py --webhook-host 0.0.0.0
+
+# Комбинация параметров
+python main.py --webhook-host 127.0.0.1 --webhook-port 8080
 ```
+
+**Примечание:** Для production рекомендуется использовать systemd сервис (см. `install_service.sh`).
 
 ## Тестирование и статический анализ
 

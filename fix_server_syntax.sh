@@ -37,7 +37,7 @@ fi
 
 echo "Используется Python: $PYTHON"
 $PYTHON -m py_compile webhook_server.py 2>&1 && echo "✅ webhook_server.py: синтаксис корректен" || echo "❌ webhook_server.py: ошибка синтаксиса"
-$PYTHON -m py_compile run.py 2>&1 && echo "✅ run.py: синтаксис корректен" || echo "❌ run.py: ошибка синтаксиса"
+$PYTHON -m py_compile main.py 2>&1 && echo "✅ main.py: синтаксис корректен" || echo "❌ main.py: ошибка синтаксиса"
 echo ""
 
 # 5. Показываем строку 742 из webhook_server.py

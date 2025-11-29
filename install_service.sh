@@ -10,14 +10,14 @@ cd "$SCRIPT_DIR"
 echo "📂 Текущая директория: $SCRIPT_DIR"
 echo ""
 
-# Проверяем, что мы в правильной директории (должны быть файлы run.py, config/, и т.д.)
-if [ ! -f "run.py" ]; then
-    echo "❌ Ошибка: файл run.py не найден в текущей директории"
+# Проверяем, что мы в правильной директории (должны быть файлы main.py, config/, и т.д.)
+if [ ! -f "main.py" ]; then
+    echo "❌ Ошибка: файл main.py не найден в текущей директории"
     echo "   Убедитесь, что вы находитесь в корневой директории проекта"
     echo "   Ожидаемый путь: /home/dev_bot/telegram_planfix_bot"
     exit 1
 fi
-echo "✅ Проверка директории: файл run.py найден"
+echo "✅ Проверка директории: файл main.py найден"
 echo ""
 
 # Проверка прав root
@@ -84,7 +84,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment="PATH=$(dirname $VENV_PYTHON):/usr/local/bin:/usr/bin:/bin"
 Environment="SYSTEMD_SERVICE=1"
 Environment="LOG_DIR=$LOG_DIR"
-ExecStart=$VENV_PYTHON $PROJECT_DIR/run.py --mode both
+ExecStart=$VENV_PYTHON $PROJECT_DIR/main.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

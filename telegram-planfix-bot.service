@@ -10,7 +10,7 @@ WorkingDirectory=/home/dev_bot/telegram_planfix_bot
 Environment="PATH=/home/dev_bot/telegram_planfix_bot/venv/bin"
 Environment="SYSTEMD_SERVICE=1"
 Environment="LOG_DIR=/home/dev_bot/telegram_planfix_bot/logs"
-ExecStart=/home/dev_bot/telegram_planfix_bot/venv/bin/python3 /home/dev_bot/telegram_planfix_bot/run.py --mode both
+ExecStart=/home/dev_bot/telegram_planfix_bot/venv/bin/python3 /home/dev_bot/telegram_planfix_bot/main.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

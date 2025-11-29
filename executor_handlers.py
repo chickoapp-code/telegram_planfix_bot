@@ -1490,10 +1490,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
             allowed_tag_names = {tag.lower() for tag in allowed_tags if isinstance(tag, str)}
             
             logger.info(
-                f"Executor {executor.telegram_id} filters: "
+                f"🔍 Executor {executor.telegram_id} filters: "
                 f"direction={executor.service_direction}, "
-                f"allowed_templates={allowed_templates}, "
-                f"allowed_restaurant_ids={allowed_restaurant_ids}, "
+                f"allowed_templates={allowed_templates} (count: {len(allowed_templates)}), "
+                f"allowed_restaurant_ids={allowed_restaurant_ids} (count: {len(allowed_restaurant_ids)}), "
+                f"allowed_tag_names={allowed_tag_names} (count: {len(allowed_tag_names)}), "
                 f"serving_restaurants={executor.serving_restaurants}"
             )
 
@@ -1513,7 +1514,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     working_status_ids = []
 
             logger.info(
-                f"Executor {executor.telegram_id} will query tasks with status_ids: {working_status_ids}"
+                f"📊 Executor {executor.telegram_id} will query tasks with status_ids: {working_status_ids} (count: {len(working_status_ids) if working_status_ids else 0})"
             )
 
             all_new_tasks = []
@@ -1636,7 +1637,8 @@ async def show_new_tasks(message: Message, state: FSMContext):
 
                     tasks = tasks_response.get('tasks', []) or []
                     logger.info(
-                        f"Executor {executor.telegram_id} fetched {len(tasks)} tasks for status {status_id} (page {page_index + 1})"
+                        f"📥 Executor {executor.telegram_id} fetched {len(tasks)} tasks for status {status_id} (page {page_index + 1}), "
+                        f"total tasks so far: {len(all_new_tasks)}"
                     )
                     
                     # Дополнительная диагностика если задач нет, но ответ успешный
@@ -1800,8 +1802,17 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         for log in bot_logs:
                             if log.details:
                                 try:
-                                    log_task_id = log.details.get('task_id')
-                                    if log_task_id is not None:
+                                    # Проверяем все возможные поля с ID задачи
+                                    task_id_candidates = [
+                                        log.details.get('task_id'),
+                                        log.details.get('task_id_internal'),
+                                        log.details.get('task_id_general'),
+                                    ]
+                                    
+                                    for log_task_id in task_id_candidates:
+                                        if log_task_id is None:
+                                            continue
+                                        
                                         # Нормализуем ID из лога
                                         log_task_id_int = None
                                         if isinstance(log_task_id, int):
@@ -1814,7 +1825,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                         
                                         # Сравниваем с task_id из задачи
                                         if log_task_id_int == task_id:
-                                            logger.debug(f"Task {task_id} found in BotLog - confirmed as bot task")
+                                            logger.debug(f"Task {task_id} found in BotLog (matched {log_task_id}) - confirmed as bot task")
                                             return True
                                 except (ValueError, TypeError, AttributeError):
                                     continue
