@@ -1960,6 +1960,116 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 else:
                     logger.info(f"Task {t.get('id')} filtered out by _is_bot_task check")
             
+            # КРИТИЧНО: Проверяем недавно созданные задачи из BotLog, которые могли не попасть в API запрос
+            # Это может произойти, если задача только что создана и еще не попала в первую страницу
+            try:
+                from datetime import datetime, timedelta
+                recent_time = datetime.now() - timedelta(hours=1)  # Задачи за последний час
+                
+                with db_manager.get_db() as db:
+                    from database import BotLog
+                    recent_bot_logs = db.query(BotLog).filter(
+                        BotLog.action == "create_task",
+                        BotLog.success == True,
+                        BotLog.created_at >= recent_time
+                    ).order_by(BotLog.id.desc()).limit(20).all()
+                    
+                    existing_task_ids = {int(t.get('id')) for t in filtered_tasks if t.get('id')}
+                    
+                    for log in recent_bot_logs:
+                        if not log.details:
+                            continue
+                        
+                        # Получаем все возможные ID задачи
+                        task_id_candidates = [
+                            log.details.get('task_id'),
+                            log.details.get('task_id_internal'),
+                            log.details.get('task_id_general'),
+                        ]
+                        
+                        for log_task_id in task_id_candidates:
+                            if log_task_id is None:
+                                continue
+                            
+                            try:
+                                if isinstance(log_task_id, str) and ':' in log_task_id:
+                                    log_task_id = int(log_task_id.split(':')[-1])
+                                else:
+                                    log_task_id = int(log_task_id)
+                                
+                                # Если задача уже есть в списке, пропускаем
+                                if log_task_id in existing_task_ids:
+                                    continue
+                                
+                                # Запрашиваем задачу напрямую из API
+                                logger.info(f"🔍 Fetching missing recent task {log_task_id} from BotLog (not in API results)")
+                                try:
+                                    task_response = await planfix_client.get_task_by_id(
+                                        log_task_id,
+                                        fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
+                                    )
+                                    
+                                    if task_response and task_response.get('result') == 'success':
+                                        task = task_response.get('task', {})
+                                        if task:
+                                            # Проверяем, что задача соответствует фильтрам
+                                            task_id = task.get('id')
+                                            if task_id:
+                                                # Нормализуем task_id
+                                                try:
+                                                    if isinstance(task_id, str) and ':' in task_id:
+                                                        task_id = int(task_id.split(':')[-1])
+                                                    else:
+                                                        task_id = int(task_id)
+                                                    
+                                                    # Проверяем, что задача еще не добавлена
+                                                    if task_id not in existing_task_ids:
+                                                        # Применяем те же фильтры, что и для задач из списка
+                                                        template_obj = task.get('template', {})
+                                                        template_id = _normalize_pf_id(template_obj.get('id') if isinstance(template_obj, dict) else template_obj)
+                                                        
+                                                        # Проверяем шаблон
+                                                        if allowed_templates and template_id not in allowed_templates:
+                                                            # Если это задача бота, пропускаем проверку шаблона
+                                                            if task_id not in bot_task_ids_set:
+                                                                logger.debug(f"Task {task_id} from BotLog filtered out by template: {template_id} not in {allowed_templates}")
+                                                                continue
+                                                        
+                                                        # Проверяем ресторан
+                                                        counterparty_obj = task.get('counterparty', {})
+                                                        counterparty_id = _normalize_pf_id(counterparty_obj.get('id') if isinstance(counterparty_obj, dict) else counterparty_obj)
+                                                        if allowed_restaurant_ids and counterparty_id not in allowed_restaurant_ids:
+                                                            logger.debug(f"Task {task_id} from BotLog filtered out by restaurant: {counterparty_id} not in allowed")
+                                                            continue
+                                                        
+                                                        # Проверяем теги
+                                                        task_tag_names = _extract_task_tags(task)
+                                                        if allowed_tag_names:
+                                                            if task_tag_names:
+                                                                if not (task_tag_names & allowed_tag_names):
+                                                                    logger.debug(f"Task {task_id} from BotLog filtered out by tags")
+                                                                    continue
+                                                            else:
+                                                                # Нет тегов - проверяем шаблон
+                                                                if template_id not in allowed_templates:
+                                                                    logger.debug(f"Task {task_id} from BotLog filtered out: no tags and wrong template")
+                                                                    continue
+                                                        
+                                                        # Задача прошла все фильтры - добавляем
+                                                        logger.info(f"✅ Added missing recent task {task_id} from BotLog to results")
+                                                        filtered_tasks.append(task)
+                                                        existing_task_ids.add(task_id)
+                                                except (ValueError, TypeError) as e:
+                                                    logger.warning(f"Error processing task {log_task_id} from BotLog: {e}")
+                                                    continue
+                                except Exception as fetch_err:
+                                    logger.warning(f"Failed to fetch task {log_task_id} from API: {fetch_err}")
+                                    continue
+                            except (ValueError, TypeError):
+                                continue
+            except Exception as recent_err:
+                logger.warning(f"Error checking recent BotLog tasks: {recent_err}")
+            
             all_new_tasks = filtered_tasks
             logger.info(
                 f"Executor {executor.telegram_id} final filtered tasks: {len(all_new_tasks)} "

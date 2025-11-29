@@ -937,7 +937,8 @@ class PlanfixWebhookHandler:
         Используется для повторной отправки уведомлений исполнителям.
         """
         try:
-            logger.info(f"🔔 Processing task.reminder webhook. Data: {json.dumps(data, ensure_ascii=False, indent=2)}")
+            logger.info(f"🔔 Processing task.reminder webhook")
+            logger.debug(f"🔔 task.reminder full data: {json.dumps(data, ensure_ascii=False, indent=2)}")
             
             task = data.get('task', {})
             if not task:
@@ -1331,7 +1332,8 @@ async def webhook_handler(request):
             await handler.handle_comment_added(data)
         elif event_type == 'task.reminder' or event_type == 'task.remind':
             # Обработка напоминаний о задачах, которые еще не взяты в работу
-            logger.info(f"🔔 Received task.reminder webhook: {json.dumps(data, ensure_ascii=False)}")
+            logger.info(f"🔔 Received task.reminder webhook")
+            logger.debug(f"🔔 task.reminder data: {json.dumps(data, ensure_ascii=False, indent=2)}")
             await handler.handle_task_reminder(data)
         else:
             logger.warning(f"Unknown event type: {event_type}")
