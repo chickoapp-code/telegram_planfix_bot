@@ -45,10 +45,18 @@ DIRECTORY_RESTAURANTS_ID=123
 1. Склонировать репозиторий и перейти в директорию проекта.
 2. Создать виртуальное окружение и установить зависимости:
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # Windows: .venv\Scripts\activate
+   # Linux/macOS
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   
+   # Windows
+   python -m venv venv
+   venv\Scripts\activate
    pip install -r requirements.txt
    ```
+   
+   **Примечание:** На Linux обычно используется `python3`, на Windows - `python`.
 3. Скопировать файл `env.example` в `.env` и заполнить значения.
    ```bash
    cp env.example .env
@@ -73,7 +81,10 @@ venv\Scripts\activate
 Бот запускается вместе с webhook сервером через `main.py`:
 
 ```bash
-python main.py
+# После активации виртуального окружения
+python3 main.py  # Linux/macOS
+# или
+python main.py   # Windows (после активации venv)
 ```
 
 Логи отображаются в реальном времени в консоли.
@@ -82,17 +93,19 @@ python main.py
 
 ```bash
 # Запуск с настройками по умолчанию (webhook на 127.0.0.1:8080)
-python main.py
+python3 main.py  # Linux/macOS
 
 # Указать порт webhook
-python main.py --webhook-port 9000
+python3 main.py --webhook-port 9000
 
 # Указать хост webhook (0.0.0.0 для доступа извне)
-python main.py --webhook-host 0.0.0.0
+python3 main.py --webhook-host 0.0.0.0
 
 # Комбинация параметров
-python main.py --webhook-host 127.0.0.1 --webhook-port 8080
+python3 main.py --webhook-host 127.0.0.1 --webhook-port 8080
 ```
+
+**Важно:** На Linux используйте `python3`, на Windows (после активации venv) можно использовать `python`.
 
 ### Альтернативный запуск через скрипт
 

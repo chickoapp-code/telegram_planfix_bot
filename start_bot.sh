@@ -8,14 +8,24 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Проверяем наличие виртуального окружения
-if [ ! -d "venv" ]; then
-    echo "❌ Виртуальное окружение не найдено. Создайте его командой: python3 -m venv venv"
+# Проверяем наличие виртуального окружения (пробуем venv и .venv)
+if [ ! -d "venv" ] && [ ! -d ".venv" ]; then
+    echo "❌ Виртуальное окружение не найдено."
+    echo "   Создайте его командой: python3 -m venv venv"
+    echo "   Затем активируйте: source venv/bin/activate"
+    echo "   И установите зависимости: pip install -r requirements.txt"
     exit 1
 fi
 
+# Определяем какое виртуальное окружение использовать
+if [ -d "venv" ]; then
+    VENV_DIR="venv"
+elif [ -d ".venv" ]; then
+    VENV_DIR=".venv"
+fi
+
 # Активируем виртуальное окружение
-source venv/bin/activate
+source "$VENV_DIR/bin/activate"
 
 # Проверяем наличие .env файла
 if [ ! -f ".env" ]; then
