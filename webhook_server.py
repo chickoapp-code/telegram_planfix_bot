@@ -4,6 +4,8 @@ Webhook сервер для получения уведомлений от Planf
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -13,7 +15,7 @@ from typing import Optional, Set
 from aiohttp import web
 from aiogram import Bot
 
-from config import BOT_TOKEN, FRANCHISE_GROUPS, PLANFIX_TASK_PROCESS_ID
+from config import BOT_TOKEN, FRANCHISE_GROUPS, PLANFIX_TASK_PROCESS_ID, PLANFIX_WEBHOOK_SECRET, WEBHOOK_MAX_BODY_SIZE
 from db_manager import DBManager
 from keyboards import get_executor_main_menu_keyboard
 from logging_config import setup_logging
@@ -190,29 +192,63 @@ class PlanfixWebhookHandler:
         """Обработка создания новой задачи."""
         try:
             task = data.get('task', {})
-            task_id_raw = task.get('id')
+            # Приоритет: generalId > id (generalId - публичный идентификатор)
+            task_identifier = task.get('generalId') or task.get('id')
             project_id_raw = task.get('project', {}).get('id')
             
-            if not task_id_raw or not project_id_raw:
+            if not task_identifier:
                 logger.warning(f"Incomplete task data in webhook: {data}")
                 return
             
-            # Преобразуем task_id и project_id в int, если это строки
+            # Преобразуем task_id в int
             try:
-                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
-                # project_id может быть строкой "Без проекта" или другим нечисловым значением
+                if isinstance(task_identifier, str):
+                    if task_identifier.isdigit():
+                        task_id = int(task_identifier)
+                    else:
+                        parts = task_identifier.split(':')
+                        if len(parts) > 1 and parts[-1].isdigit():
+                            task_id = int(parts[-1])
+                        else:
+                            logger.warning(f"Invalid task_id format: {task_identifier}")
+                            return
+                else:
+                    task_id = int(task_identifier)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid task_id format: {task_identifier}")
+                return
+            
+            # Обрабатываем project_id и counterparty
+            project_id = None
+            if project_id_raw:
                 if isinstance(project_id_raw, str):
-                    # Пытаемся преобразовать в число, если не получается - пропускаем задачу
                     try:
                         project_id = int(project_id_raw)
                     except (ValueError, TypeError):
-                        # Если project_id не число (например, "Без проекта"), пропускаем задачу
                         logger.debug(f"Skipping task {task_id}: project_id is not a number ({project_id_raw})")
                         return
                 else:
                     project_id = project_id_raw
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid task_id or project_id format: task_id={task_id_raw}, project_id={project_id_raw}")
+            
+            # Обрабатываем counterparty (может быть объект {"id": 5} или строка "contact:5")
+            counterparty_id = None
+            counterparty_raw = task.get('counterparty')
+            if counterparty_raw:
+                if isinstance(counterparty_raw, dict):
+                    counterparty_id = counterparty_raw.get('id')
+                elif isinstance(counterparty_raw, str):
+                    if ':' in counterparty_raw:
+                        counterparty_id = counterparty_raw.split(':')[-1]
+                    else:
+                        counterparty_id = counterparty_raw
+                if counterparty_id:
+                    try:
+                        counterparty_id = int(counterparty_id) if str(counterparty_id).isdigit() else counterparty_id
+                    except (ValueError, TypeError):
+                        counterparty_id = None
+            
+            if not project_id:
+                logger.debug(f"Skipping task {task_id}: no valid project_id")
                 return
             
             # Фильтруем только релевантные задачи
@@ -220,17 +256,21 @@ class PlanfixWebhookHandler:
                 logger.debug(f"Task {task_id} creation skipped by filter")
                 return
             
-            logger.info(f"📋 New task created: {task_id} in project {project_id}")
+            logger.info(f"📋 New task created: {task_id} in project {project_id}" + 
+                       (f", counterparty: {counterparty_id}" if counterparty_id else ""))
             await self.notification_service.notify_new_task(task_id, project_id)
             
             # Сохраняем начальный статус в кэш
-            # Получаем статус из всех возможных мест
+            # Согласно swagger.json, статус должен быть объектом {"id": 4, "name": "В работе"}
             status_obj = task.get('status', {})
-            status_id_raw = (
-                status_obj.get('id') or 
-                status_obj.get('task.status.id') or 
-                status_obj.get('task.status.Идентификатор')
-            )
+            if isinstance(status_obj, dict):
+                status_id_raw = (
+                    status_obj.get('id') or  # Стандартный формат (приоритет)
+                    status_obj.get('task.status.id') or 
+                    status_obj.get('task.status.Идентификатор')
+                )
+            else:
+                status_id_raw = None
             status_id = self._normalize_status_id(status_id_raw)
             if status_id:
                 self._task_status_cache[task_id] = status_id
@@ -246,17 +286,31 @@ class PlanfixWebhookHandler:
             await ensure_status_registry_loaded()
             
             task = data.get('task', {})
-            task_id_raw = task.get('id')
+            # Приоритет: generalId > id (generalId - публичный идентификатор)
+            task_identifier = task.get('generalId') or task.get('id')
             
-            if not task_id_raw:
+            if not task_identifier:
                 logger.warning(f"Incomplete task data in webhook: {data}")
                 return
             
             # Преобразуем task_id в int, если это строка
             try:
-                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
+                if isinstance(task_identifier, str):
+                    # Если это строка с числом, преобразуем
+                    if task_identifier.isdigit():
+                        task_id = int(task_identifier)
+                    else:
+                        # Может быть формат "task:123" или другой
+                        parts = task_identifier.split(':')
+                        if len(parts) > 1 and parts[-1].isdigit():
+                            task_id = int(parts[-1])
+                        else:
+                            logger.warning(f"Invalid task_id format: {task_identifier}")
+                            return
+                else:
+                    task_id = int(task_identifier)
             except (ValueError, TypeError):
-                logger.warning(f"Invalid task_id format: {task_id_raw}")
+                logger.warning(f"Invalid task_id format: {task_identifier}")
                 return
             
             # Фильтруем только релевантные задачи
@@ -265,21 +319,23 @@ class PlanfixWebhookHandler:
                 return
             
             # Получаем новый статус
-            # Planfix может передавать статус в разных форматах:
-            # 1. task.status["task.status.id"] и task.status["task.status.name"] (формат из шаблона - приоритетный, т.к. содержит ID)
-            # 2. task.status.id и task.status.name (стандартный формат, но id может быть строкой с названием)
+            # Согласно swagger.json, статус должен быть объектом {"id": 4, "name": "В работе"}
+            # Но Planfix может передавать статус в разных форматах в webhook
             status_obj = task.get('status', {})
-            # Сначала проверяем task.status.id (из шаблона), т.к. там обычно числовой ID
+            if not isinstance(status_obj, dict):
+                status_obj = {}
+            
+            # Приоритет: стандартный формат (id, name) > формат из шаблона
             status_id_raw = (
+                status_obj.get('id') or  # Стандартный формат (приоритет)
                 status_obj.get('task.status.id') or 
-                status_obj.get('task.status.Идентификатор') or
-                status_obj.get('id')  # Может быть строкой с названием, но проверим
+                status_obj.get('task.status.Идентификатор')
             )
             status_name_raw = (
-                status_obj.get('name') or 
+                status_obj.get('name') or  # Стандартный формат (приоритет)
                 status_obj.get('task.status.name') or 
                 status_obj.get('task.status.Активный') or
-                status_obj.get('task.status.Статус')  # На случай если переменная не подставилась
+                status_obj.get('task.status.Статус')
             )
             new_status_id = self._normalize_status_id(status_id_raw)
             old_status_id = self._task_status_cache.get(task_id)
@@ -289,16 +345,45 @@ class PlanfixWebhookHandler:
             assignee_users_raw = assignees.get('users', []) if isinstance(assignees, dict) else []
             
             # Нормализуем данные исполнителей
+            # Согласно swagger.json, assignees.users содержит объекты вида:
+            # [{"id": "user:5", "name": "Иван"}, {"id": "contact:1", "name": "Петр"}]
             assignee_users = []
             if isinstance(assignee_users_raw, list):
                 for user in assignee_users_raw:
                     if isinstance(user, dict):
-                        # Если id - это массив, берем первый элемент
-                        if 'id' in user and isinstance(user['id'], list) and user['id']:
-                            user['id'] = user['id'][0]
+                        # Нормализуем ID: "user:123" -> сохраняем как есть, но добавляем normalized_id
+                        user_id = user.get('id')
+                        if user_id:
+                            # Если id - это массив, берем первый элемент
+                            if isinstance(user_id, list) and user_id:
+                                user_id = user_id[0]
+                            
+                            # Нормализуем ID
+                            if isinstance(user_id, str) and ':' in user_id:
+                                prefix, uid = user_id.split(':', 1)
+                                if prefix == 'user':
+                                    # Для user:ID сохраняем числовой ID
+                                    try:
+                                        user['normalized_id'] = int(uid) if uid.isdigit() else uid
+                                    except (ValueError, TypeError):
+                                        user['normalized_id'] = uid
+                                else:
+                                    # Для contact:ID и других сохраняем как есть
+                                    user['normalized_id'] = user_id
+                            elif isinstance(user_id, (int, str)):
+                                # Если ID без префикса, считаем что это user ID
+                                try:
+                                    user['normalized_id'] = int(user_id) if str(user_id).isdigit() else user_id
+                                except (ValueError, TypeError):
+                                    user['normalized_id'] = user_id
+                            
+                            # Обновляем оригинальный id если он был массивом
+                            user['id'] = user_id
+                        
                         # Если name - это массив, берем первый элемент
                         if 'name' in user and isinstance(user['name'], list) and user['name']:
                             user['name'] = user['name'][0]
+                        
                         assignee_users.append(user)
             elif isinstance(assignee_users_raw, dict):
                 # Если users - это объект, преобразуем в массив
@@ -750,15 +835,37 @@ class PlanfixWebhookHandler:
                                         return user_id
             
             # ПРИОРИТЕТ 2: Ищем в кастомных полях
+            # Согласно swagger.json, customFieldData - массив объектов:
+            # [{"field": {"id": 10, "type": 0}, "value": "Test value"}]
             custom_fields = task.get('customFieldData', [])
-            for field in custom_fields:
-                field_id = field.get('field', {}).get('id')
-                if field_id in (85, 86, 87, 88, 89, 90):
-                    value = field.get('value')
-                    if value:
-                        planfix_user_id = str(value).strip()
-                        logger.info(f"Found planfix_user_id {planfix_user_id} in custom field {field_id}")
-                        return planfix_user_id
+            if isinstance(custom_fields, list):
+                for field_data in custom_fields:
+                    if not isinstance(field_data, dict):
+                        continue
+                    
+                    field_obj = field_data.get('field', {})
+                    if not isinstance(field_obj, dict):
+                        continue
+                    
+                    field_id = field_obj.get('id')
+                    field_type = field_obj.get('type')  # 0=Line, 1=Number, 10=Contact, 11=Employee, etc.
+                    field_value = field_data.get('value')
+                    
+                    # Ищем в полях типа Line (0) или Number (1), которые могут содержать User ID
+                    if field_id in (85, 86, 87, 88, 89, 90) and field_value:
+                        planfix_user_id = str(field_value).strip()
+                        if planfix_user_id.isdigit():
+                            logger.info(f"Found planfix_user_id {planfix_user_id} in custom field {field_id} (type {field_type})")
+                            return planfix_user_id
+                    
+                    # Также проверяем поля типа Employee (11), которые содержат объект {"id": "user:3", "name": "Petrov"}
+                    if field_type == 11 and isinstance(field_value, dict):
+                        employee_id = field_value.get('id')
+                        if employee_id:
+                            normalized_id = self._normalize_user_id(employee_id)
+                            if normalized_id and normalized_id.isdigit():
+                                logger.info(f"Found planfix_user_id {normalized_id} in custom field {field_id} (type Employee)")
+                                return normalized_id
             
             # ПРИОРИТЕТ 3: Ищем в описании
             description = task.get('description', '')
@@ -836,14 +943,17 @@ class PlanfixWebhookHandler:
                 logger.warning(f"Invalid task_id format in reminder: {task_id_raw}")
                 return
             
-            # Если в вебхуке недостаточно данных, получаем задачу через API
+            # Если в вебхуке недостаточно данных (только id), получаем задачу через API
+            # Согласно PLANFIX_REMINDER_WEBHOOK_EXAMPLE.json, webhook может содержать только task.id
             task_data_from_webhook = task
-            if not task.get('status') or not task.get('assignees'):
-                logger.debug(f"Task {task_id} reminder: fetching full task data from API")
+            needs_full_data = not task.get('status') or not task.get('assignees')
+            
+            if needs_full_data:
+                logger.debug(f"Task {task_id} reminder: fetching full task data from API (webhook contains only id)")
                 try:
                     task_response = await planfix_client.get_task_by_id(
                         task_id,
-                        fields="id,status,assignees,process"
+                        fields="id,status,assignees,process,project"
                     )
                     if task_response and task_response.get('result') == 'success':
                         task_data_from_webhook = task_response.get('task', {})
@@ -859,13 +969,16 @@ class PlanfixWebhookHandler:
                 return
             
             # Проверяем, что задача еще не взята в работу
-            # 1. Проверяем статус задачи
+            # 1. Проверяем статус задачи (согласно swagger.json, статус - объект {"id": 4, "name": "В работе"})
             status_obj = task_data_from_webhook.get('status', {})
-            status_id_raw = (
-                status_obj.get('task.status.id') or 
-                status_obj.get('task.status.Идентификатор') or
-                status_obj.get('id')
-            )
+            if isinstance(status_obj, dict):
+                status_id_raw = (
+                    status_obj.get('id') or  # Стандартный формат (приоритет)
+                    status_obj.get('task.status.id') or 
+                    status_obj.get('task.status.Идентификатор')
+                )
+            else:
+                status_id_raw = None
             status_id = self._normalize_status_id(status_id_raw)
             
             # Если статус не "Новая" или подобный, пропускаем
@@ -893,8 +1006,15 @@ class PlanfixWebhookHandler:
                     return
             
             # 3. Проверяем назначенных исполнителей в Planfix
+            # Согласно swagger.json, assignees.users - массив объектов [{"id": "user:5", "name": "Иван"}]
             assignees = task_data_from_webhook.get('assignees', {})
-            assignee_users = assignees.get('users', []) if isinstance(assignees, dict) else []
+            assignee_users = []
+            if isinstance(assignees, dict):
+                assignee_users_raw = assignees.get('users', [])
+                if isinstance(assignee_users_raw, list):
+                    assignee_users = assignee_users_raw
+                elif isinstance(assignee_users_raw, dict):
+                    assignee_users = [assignee_users_raw]
             
             if assignee_users and len(assignee_users) > 0:
                 logger.info(f"Task {task_id} reminder skipped: task has {len(assignee_users)} assignee(s) in Planfix")
@@ -913,7 +1033,32 @@ async def webhook_handler(request):
     try:
         # Получаем сырое тело запроса для диагностики
         raw_body = await request.read()
+        
+        # Проверка размера тела запроса (защита от DoS)
+        if len(raw_body) > WEBHOOK_MAX_BODY_SIZE:
+            logger.warning(f"Webhook body too large: {len(raw_body)} bytes (max: {WEBHOOK_MAX_BODY_SIZE})")
+            return web.Response(text='Payload too large', status=413)
+        
         content_type = request.headers.get('Content-Type', '').lower()
+        
+        # Проверка подписи webhook (если настроен секрет)
+        if PLANFIX_WEBHOOK_SECRET:
+            signature_header = request.headers.get('X-Planfix-Signature') or request.headers.get('X-Signature')
+            if signature_header:
+                # Вычисляем ожидаемую подпись (HMAC-SHA256)
+                expected_signature = hmac.new(
+                    PLANFIX_WEBHOOK_SECRET.encode('utf-8'),
+                    raw_body,
+                    hashlib.sha256
+                ).hexdigest()
+                
+                # Сравниваем подписи (защита от timing attacks)
+                if not hmac.compare_digest(signature_header, expected_signature):
+                    logger.warning("Invalid webhook signature")
+                    return web.Response(text='Invalid signature', status=401)
+            else:
+                logger.warning("Webhook secret configured but no signature header found")
+                # Не блокируем, т.к. Planfix может не отправлять подпись
         
         # Логируем информацию о запросе
         logger.info(f"Received webhook: method={request.method}, content_type={content_type}, body_length={len(raw_body)}")
@@ -963,94 +1108,39 @@ async def webhook_handler(request):
                     # Сначала обрабатываем простые случаи
                     body_text = re.sub(r':\s*"(\[[^\]]*\])"', fix_array_strings, body_text)
                     
-                    # 3. Исправляем вложенные JSON-объекты в строках (например, comment.json)
+                    # Исправляем вложенные JSON-объекты в строках (например, comment.json)
                     # Planfix может вставлять JSON-объекты как строки с неэкранированными кавычками
-                    # Ищем паттерн "key": "{...}" где внутри может быть JSON-объект
-                    def fix_nested_json_in_strings(text):
-                        result = []
-                        i = 0
-                        while i < len(text):
-                            # Ищем паттерн ": "{"
-                            if i < len(text) - 3 and text[i:i+3] == ': "{':
-                                # Нашли начало потенциального вложенного JSON
-                                key_start = text.rfind('"', 0, i)
-                                if key_start >= 0:
-                                    key = text[key_start+1:i]
-                                    # Пытаемся найти конец JSON-объекта
-                                    brace_count = 0
-                                    bracket_count = 0  # Для массивов
-                                    json_start = i + 2  # После ': "'
-                                    j = json_start
-                                    found_end = False
-                                    in_string = False
-                                    escape_next = False
-                                    
-                                    while j < len(text):
-                                        if escape_next:
-                                            escape_next = False
-                                            j += 1
-                                            continue
-                                        
-                                        if text[j] == '\\':
-                                            escape_next = True
-                                            j += 1
-                                            continue
-                                        
-                                        if text[j] == '"' and not escape_next:
-                                            in_string = not in_string
-                                            j += 1
-                                            continue
-                                        
-                                        if not in_string:
-                                            if text[j] == '{':
-                                                brace_count += 1
-                                            elif text[j] == '}':
-                                                brace_count -= 1
-                                                if brace_count == 0 and bracket_count == 0:
-                                                    # Нашли конец объекта
-                                                    json_str = text[json_start:j+1]
-                                                    try:
-                                                        # Пытаемся распарсить как JSON
-                                                        parsed = json.loads(json_str)
-                                                        # Если успешно, заменяем строку на объект
-                                                        result.append(f'"{key}": {json.dumps(parsed, ensure_ascii=False)}')
-                                                        i = j + 2  # Пропускаем '}"'
-                                                        found_end = True
-                                                        break
-                                                    except Exception as e:
-                                                        # Если не удалось распарсить, продолжаем поиск
-                                                        pass
-                                            elif text[j] == '[':
-                                                bracket_count += 1
-                                            elif text[j] == ']':
-                                                bracket_count -= 1
-                                        j += 1
-                                    if found_end:
-                                        continue
-                            result.append(text[i])
-                            i += 1
-                        return ''.join(result)
-                    
-                    # Применяем исправление вложенных JSON-объектов ПЕРЕД парсингом
-                    body_text = fix_nested_json_in_strings(body_text)
+                    # Упрощенная обработка: пытаемся найти и распарсить JSON-строки после парсинга основного JSON
+                    # Это более надежно, чем пытаться исправить до парсинга
                     
                     data = json.loads(body_text)
                     
-                    # Постобработка: нормализуем массивы в данных (если они остались массивами)
-                    def normalize_arrays(obj):
-                        """Рекурсивно нормализует массивы в объекте."""
+                    # Постобработка: нормализуем массивы и исправляем вложенные JSON-строки
+                    def normalize_webhook_data(obj):
+                        """Рекурсивно нормализует данные webhook."""
                         if isinstance(obj, dict):
                             for key, value in obj.items():
+                                # Исправляем вложенные JSON-строки (например, comment.json)
+                                if isinstance(value, str) and value.strip().startswith('{'):
+                                    try:
+                                        # Пытаемся распарсить как JSON
+                                        parsed = json.loads(value)
+                                        obj[key] = normalize_webhook_data(parsed)
+                                        continue
+                                    except (json.JSONDecodeError, ValueError):
+                                        # Если не JSON, оставляем как строку
+                                        pass
+                                
                                 # Если значение - массив с одним элементом, заменяем на элемент
                                 if isinstance(value, list) and len(value) == 1:
-                                    obj[key] = normalize_arrays(value[0])
+                                    obj[key] = normalize_webhook_data(value[0])
                                 else:
-                                    obj[key] = normalize_arrays(value)
+                                    obj[key] = normalize_webhook_data(value)
                         elif isinstance(obj, list):
-                            return [normalize_arrays(item) for item in obj]
+                            return [normalize_webhook_data(item) for item in obj]
                         return obj
                     
-                    data = normalize_arrays(data)
+                    data = normalize_webhook_data(data)
                 elif 'application/x-www-form-urlencoded' in content_type:
                     # Парсим form-urlencoded данные
                     from urllib.parse import parse_qs, unquote

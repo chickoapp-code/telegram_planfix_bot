@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     # Webhook server configuration
     webhook_host: str = Field(default="127.0.0.1", alias="WEBHOOK_HOST")
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
+    webhook_secret: str | None = Field(default=None, alias="PLANFIX_WEBHOOK_SECRET")
+    webhook_max_body_size: int = Field(default=10 * 1024 * 1024, alias="WEBHOOK_MAX_BODY_SIZE")  # 10 MB
 
     telegram_admin_ids_raw: str | None = Field(default=None, alias="TELEGRAM_ADMIN_IDS", exclude=True)
     

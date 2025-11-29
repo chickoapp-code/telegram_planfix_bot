@@ -705,30 +705,54 @@ class PlanfixAPIClient:
             # Пробуем число, так как в примерах используется число
             task_data["counterparty"] = {"id": int(counterparty_id)}
         if process_id:
-            # Согласно swagger.json, поле называется processId и это просто число (integer), а не объект
-            task_data["processId"] = int(process_id)
+            # Согласно swagger.json, поле называется processId и это просто число (integer)
+            # В некоторых версиях API может использоваться объект process: {"id": ...}, но swagger.json показывает integer
+            # Используем processId как integer согласно swagger.json
+            try:
+                task_data["processId"] = int(process_id)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid process_id format: {process_id}, error: {e}. Skipping process_id.")
         if custom_field_data:
             if isinstance(custom_field_data, list) and len(custom_field_data) > 0:
                 task_data["customFieldData"] = custom_field_data
         if files:
             # Нормализуем ID файлов: убираем префикс если есть, преобразуем в int
+            # Согласно swagger.json, files должен быть массивом объектов [{"id": 10}, {"id": 15}]
             file_items = []
             for f_id in files:
                 if f_id is None:
                     continue
+                
+                # Если f_id уже объект с id, извлекаем id
+                if isinstance(f_id, dict) and 'id' in f_id:
+                    f_id = f_id['id']
+                
+                # Нормализуем ID
+                normalized_id = None
                 if isinstance(f_id, str) and ':' in f_id:
                     try:
-                        f_id = int(f_id.split(':')[-1])
+                        normalized_id = int(f_id.split(':')[-1])
                     except (ValueError, TypeError):
                         logger.warning(f"Could not parse file_id: {f_id}")
                         continue
-                elif not isinstance(f_id, int):
+                elif isinstance(f_id, int):
+                    normalized_id = f_id
+                elif isinstance(f_id, str):
                     try:
-                        f_id = int(f_id)
+                        normalized_id = int(f_id)
                     except (ValueError, TypeError):
                         logger.warning(f"Could not convert file_id to int: {f_id}")
                         continue
-                file_items.append(f_id)
+                else:
+                    logger.warning(f"Invalid file_id type: {type(f_id)}, value: {f_id}")
+                    continue
+                
+                # Валидация: проверяем, что ID положительное число
+                if normalized_id and normalized_id > 0:
+                    file_items.append(normalized_id)
+                else:
+                    logger.warning(f"Invalid file_id (must be positive): {normalized_id}")
+            
             if file_items:
                 task_data["files"] = [{"id": f_id} for f_id in file_items]
 

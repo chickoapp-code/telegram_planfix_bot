@@ -155,6 +155,10 @@ UNIVERSAL_TEMPLATE_ENABLED = False
 SUPPORT_CONTACT_GROUP_ID = settings.support_contact_group_id
 SUPPORT_CONTACT_TEMPLATE_ID = settings.support_contact_template_id
 
+# Webhook configuration
+PLANFIX_WEBHOOK_SECRET = settings.webhook_secret
+WEBHOOK_MAX_BODY_SIZE = settings.webhook_max_body_size
+
 _TEMPLATE_REGISTRY: Dict[int, Dict[str, object]] = {
     **PLANFIX_SE_TEMPLATES,
     **PLANFIX_IT_TEMPLATES,
@@ -327,5 +331,7 @@ __all__ = [
     "get_contacts_by_group",
     "SUPPORT_CONTACT_GROUP_ID",
     "SUPPORT_CONTACT_TEMPLATE_ID",
+    "PLANFIX_WEBHOOK_SECRET",
+    "WEBHOOK_MAX_BODY_SIZE",
 ]
 
