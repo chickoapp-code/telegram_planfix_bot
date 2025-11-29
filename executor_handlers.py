@@ -1971,10 +1971,22 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     recent_bot_logs = db.query(BotLog).filter(
                         BotLog.action == "create_task",
                         BotLog.success == True,
-                        BotLog.created_at >= recent_time
+                        BotLog.timestamp >= recent_time
                     ).order_by(BotLog.id.desc()).limit(20).all()
                     
-                    existing_task_ids = {int(t.get('id')) for t in filtered_tasks if t.get('id')}
+                    # Собираем все ID задач из уже отфильтрованного списка (нормализуем ID)
+                    existing_task_ids = set()
+                    for t in filtered_tasks:
+                        task_id = t.get('id')
+                        if task_id:
+                            try:
+                                if isinstance(task_id, str) and ':' in task_id:
+                                    task_id = int(task_id.split(':')[-1])
+                                else:
+                                    task_id = int(task_id)
+                                existing_task_ids.add(task_id)
+                            except (ValueError, TypeError):
+                                continue
                     
                     for log in recent_bot_logs:
                         if not log.details:
@@ -2004,10 +2016,30 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                 # Запрашиваем задачу напрямую из API
                                 logger.info(f"🔍 Fetching missing recent task {log_task_id} from BotLog (not in API results)")
                                 try:
-                                    task_response = await planfix_client.get_task_by_id(
-                                        log_task_id,
-                                        fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
-                                    )
+                                    # Пробуем сначала по generalId, если не получится - по internal id
+                                    task_response = None
+                                    try:
+                                        task_response = await planfix_client.get_task_by_id(
+                                            log_task_id,
+                                            fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
+                                        )
+                                    except Exception as e1:
+                                        logger.debug(f"Failed to fetch task {log_task_id} by generalId: {e1}")
+                                        # Если есть internal id, пробуем его
+                                        internal_id = log.details.get('task_id_internal')
+                                        if internal_id and internal_id != log_task_id:
+                                            try:
+                                                task_response = await planfix_client.get_task_by_id(
+                                                    int(internal_id),
+                                                    fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
+                                                )
+                                                logger.info(f"✅ Fetched task {log_task_id} by internal ID {internal_id}")
+                                            except Exception as e2:
+                                                logger.warning(f"Failed to fetch task {log_task_id} by internal ID {internal_id}: {e2}")
+                                    
+                                    if not task_response:
+                                        logger.warning(f"Could not fetch task {log_task_id} from API")
+                                        continue
                                     
                                     if task_response and task_response.get('result') == 'success':
                                         task = task_response.get('task', {})
