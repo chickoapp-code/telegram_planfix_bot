@@ -119,7 +119,82 @@ python3 main.py --webhook-host 127.0.0.1 --webhook-port 8080
 ./start_bot.sh --webhook-port 9000
 ```
 
-**Примечание:** Для production рекомендуется использовать systemd сервис (см. `install_service.sh`).
+## Установка как системной службы (systemd)
+
+Для автоматического запуска бота при перезагрузке сервера и работы в фоновом режиме рекомендуется установить его как systemd службу.
+
+### Требования
+
+- Linux система с systemd
+- Права root (sudo) для установки службы
+- Виртуальное окружение создано и зависимости установлены
+
+### Установка
+
+1. Убедитесь, что вы находитесь в корневой директории проекта:
+   ```bash
+   cd /home/dev_bot/telegram_planfix_bot
+   ```
+
+2. Запустите скрипт установки с правами root:
+   ```bash
+   sudo ./install_service.sh
+   ```
+
+   Скрипт автоматически:
+   - Определит пользователя и группу проекта
+   - Найдет виртуальное окружение (venv или .venv)
+   - Создаст директорию для логов
+   - Создаст и установит systemd service файл
+   - Включит автозапуск при загрузке системы
+
+3. Запустите службу:
+   ```bash
+   sudo systemctl start telegram-planfix-bot
+   ```
+
+4. Проверьте статус:
+   ```bash
+   sudo systemctl status telegram-planfix-bot
+   ```
+
+### Управление службой
+
+```bash
+# Запуск
+sudo systemctl start telegram-planfix-bot
+
+# Остановка
+sudo systemctl stop telegram-planfix-bot
+
+# Перезапуск
+sudo systemctl restart telegram-planfix-bot
+
+# Просмотр статуса
+sudo systemctl status telegram-planfix-bot
+
+# Просмотр логов в реальном времени
+sudo journalctl -u telegram-planfix-bot -f
+
+# Просмотр последних 100 строк логов
+sudo journalctl -u telegram-planfix-bot -n 100
+
+# Включить автозапуск при загрузке (уже включен после install_service.sh)
+sudo systemctl enable telegram-planfix-bot
+
+# Отключить автозапуск
+sudo systemctl disable telegram-planfix-bot
+```
+
+### Проверка работы
+
+После установки служба будет:
+- ✅ Автоматически запускаться при перезагрузке сервера
+- ✅ Автоматически перезапускаться при сбоях (через 10 секунд)
+- ✅ Работать в фоновом режиме
+- ✅ Логироваться в systemd journal
+
+Вы можете безопасно завершать сеанс SSH и перезагружать сервер — бот будет работать автоматически.
 
 ## Тестирование и статический анализ
 
