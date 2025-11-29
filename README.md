@@ -136,9 +136,19 @@ python3 main.py --webhook-host 127.0.0.1 --webhook-port 8080
    cd /home/dev_bot/telegram_planfix_bot
    ```
 
-2. Запустите скрипт установки с правами root:
+2. Убедитесь, что скрипт имеет права на выполнение:
+   ```bash
+   chmod +x install_service.sh
+   ```
+
+3. Запустите скрипт установки с правами root:
    ```bash
    sudo ./install_service.sh
+   ```
+   
+   **Альтернативный способ** (если права не устанавливаются):
+   ```bash
+   sudo bash install_service.sh
    ```
 
    Скрипт автоматически:

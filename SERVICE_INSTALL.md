@@ -9,9 +9,19 @@
    cd /home/dev_bot/telegram_planfix_bot
    ```
 
-2. Запустите скрипт установки:
+2. Убедитесь, что скрипт имеет права на выполнение:
+   ```bash
+   chmod +x install_service.sh
+   ```
+
+3. Запустите скрипт установки:
    ```bash
    sudo ./install_service.sh
+   ```
+   
+   **Альтернативный способ** (если права не устанавливаются):
+   ```bash
+   sudo bash install_service.sh
    ```
 
 3. Запустите службу:
