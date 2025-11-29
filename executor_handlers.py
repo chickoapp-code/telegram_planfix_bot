@@ -1520,6 +1520,46 @@ async def show_new_tasks(message: Message, state: FSMContext):
             all_new_tasks = []
             seen_task_ids = set()
 
+            # ОПТИМИЗАЦИЯ: Загружаем все task_id из BotLog один раз для быстрой проверки
+            bot_task_ids_set = set()
+            try:
+                with db_manager.get_db() as db:
+                    from database import BotLog
+                    bot_logs = db.query(BotLog).filter(
+                        BotLog.action == "create_task",
+                        BotLog.success == True
+                    ).order_by(BotLog.id.desc()).limit(1000).all()
+                    
+                    for log in bot_logs:
+                        if log.details:
+                            try:
+                                task_id_candidates = [
+                                    log.details.get('task_id'),
+                                    log.details.get('task_id_internal'),
+                                    log.details.get('task_id_general'),
+                                ]
+                                
+                                for log_task_id in task_id_candidates:
+                                    if log_task_id is None:
+                                        continue
+                                    
+                                    try:
+                                        if isinstance(log_task_id, int):
+                                            bot_task_ids_set.add(log_task_id)
+                                        elif isinstance(log_task_id, str):
+                                            if ':' in log_task_id:
+                                                bot_task_ids_set.add(int(log_task_id.split(':')[-1]))
+                                            else:
+                                                bot_task_ids_set.add(int(log_task_id))
+                                    except (ValueError, TypeError):
+                                        continue
+                            except (ValueError, TypeError, AttributeError):
+                                continue
+                    
+                    logger.info(f"Loaded {len(bot_task_ids_set)} bot task IDs from BotLog for fast lookup")
+            except Exception as log_err:
+                logger.warning(f"Error loading bot task IDs from BotLog: {log_err}")
+
             # Вычисляем дату 7 дней назад для фильтрации
             from datetime import datetime, timedelta
             seven_days_ago = datetime.now() - timedelta(days=7)
@@ -1703,22 +1743,33 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         task_name = task.get('name', '')[:50]
                         task_desc = (task.get('description') or '')[:100]
                         
+                        # БЫСТРАЯ ПРОВЕРКА: Проверяем, создана ли задача через бота (используем предзагруженный set)
+                        is_bot_task_verified = task_id in bot_task_ids_set
+                        
                         # Логируем только задачи, которые прошли проверку статуса и даты
                         logger.info(
                             f"Task {task_id} passed filters: template_id={template_id}, counterparty_id={counterparty_id}, "
                             f"status_id={task_status_id}, status_name={task_status_name}, "
                             f"tags={list(task_tag_names)}, name={task_name}, "
-                            f"desc_preview={task_desc}"
+                            f"desc_preview={task_desc}, is_bot_task_verified={is_bot_task_verified}"
                         )
 
                         # Фильтр по шаблонам (только если у исполнителя есть ограничения)
+                        # ИСКЛЮЧЕНИЕ: задачи, созданные через бота, пропускают фильтр по шаблонам
                         if allowed_templates:
                             if template_id is None or template_id not in allowed_templates:
-                                logger.info(
-                                    f"Task {task_id} filtered out by template filter: "
-                                    f"template_id={template_id} not in allowed_templates={allowed_templates}"
-                                )
-                                continue
+                                # Если задача создана через бота, пропускаем фильтр по шаблонам
+                                if is_bot_task_verified:
+                                    logger.debug(
+                                        f"Task {task_id} has template_id={template_id} not in allowed_templates={allowed_templates}, "
+                                        f"but is verified as bot-created, skipping template filter"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Task {task_id} filtered out by template filter: "
+                                        f"template_id={template_id} not in allowed_templates={allowed_templates}"
+                                    )
+                                    continue
                         else:
                             # Если allowed_templates пусто, значит исполнитель может видеть все шаблоны
                             logger.debug(f"Task {task_id} passed template filter (no restrictions)")
