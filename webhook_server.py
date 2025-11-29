@@ -171,6 +171,29 @@ class PlanfixWebhookHandler:
         except (TypeError, ValueError):
             return None
     
+    def _normalize_int(self, value) -> Optional[int]:
+        """Нормализует целочисленное значение из webhook данных."""
+        if value is None:
+            return None
+        try:
+            # Если это строка с разделителем (например, "template:123")
+            if isinstance(value, str) and ":" in value:
+                value = value.split(":")[-1]
+            
+            # Преобразуем в int
+            if isinstance(value, str):
+                # Убираем пробелы
+                value = value.strip()
+                if not value:
+                    return None
+                return int(value)
+            elif isinstance(value, int):
+                return value
+            else:
+                return int(value)
+        except (TypeError, ValueError):
+            return None
+    
     def _is_bot_comment(self, comment: dict) -> bool:
         """Проверяет, является ли комментарий от бота."""
         owner = comment.get('owner', {})
