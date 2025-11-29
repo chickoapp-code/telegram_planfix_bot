@@ -1110,6 +1110,9 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 
                 # Используем internal id если есть, иначе generalId
                 task_id = task_id_internal if task_id_internal else task_id_general
+                
+                # ВАЖНО: Для уведомлений используем generalId, так как API может не работать с внутренним ID
+                notification_task_id = task_id_general if task_id_general else task_id
                 logger.info(f"Using task_id: {task_id} (internal: {task_id_internal}, general: {task_id_general})")
                 
                 # ОПТИМИЗАЦИЯ: Обновляем все остальные поля одним запросом (быстрее, чем множественные попытки)
@@ -1256,10 +1259,21 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     from task_notification_service import TaskNotificationService
                     task_notification_service = TaskNotificationService(message.bot)
                     # Вызываем уведомление асинхронно, чтобы не блокировать создание задачи
-                    asyncio.create_task(task_notification_service.notify_executors_about_new_task(task_id))
-                    logger.info(f"✅ Notification task created for new task {task_id} (using task_notification_service)")
+                    # ВАЖНО: Используем generalId для уведомлений, так как API может не работать с внутренним ID
+                    logger.info(f"📤 Scheduling notification for task {notification_task_id} (generalId) to executors (internal_id={task_id})")
+                    notification_task = asyncio.create_task(
+                        task_notification_service.notify_executors_about_new_task(notification_task_id)
+                    )
+                    # Добавляем обработку ошибок для задачи
+                    def log_notification_error(task):
+                        try:
+                            task.result()  # Получаем результат, чтобы увидеть исключение если есть
+                        except Exception as e:
+                            logger.error(f"❌ Notification task for {task_id} failed: {e}", exc_info=True)
+                    notification_task.add_done_callback(log_notification_error)
+                    logger.info(f"✅ Notification task scheduled for new task {task_id} (using task_notification_service)")
                 except Exception as notify_err:
-                    logger.error(f"Failed to send notification to executors for task {task_id}: {notify_err}", exc_info=True)
+                    logger.error(f"❌ Failed to schedule notification to executors for task {task_id}: {notify_err}", exc_info=True)
                     # Не прерываем создание задачи из-за ошибки уведомления
                 
                 # Предзаполняем кэш именем ресторана для задачи (cp_name:<task_id>)

@@ -160,14 +160,67 @@ class TaskNotificationService:
             task_id: ID задачи в Planfix
         """
         try:
+            logger.info(f"📨 Starting notification process for task {task_id}")
             # Получаем информацию о задаче
-            task_response = await planfix_client.get_task_by_id(
-                task_id,
-                fields="id,name,description,status,template,counterparty,tags,dataTags,project"
-            )
+            # ВАЖНО: task_id может быть как generalId, так и внутренним id
+            # Пробуем сначала как generalId, если не получится - как внутренний id
+            task_response = None
+            try:
+                task_response = await planfix_client.get_task_by_id(
+                    task_id,
+                    fields="id,name,description,status,template,counterparty,tags,dataTags,project"
+                )
+            except Exception as api_err:
+                logger.warning(f"Failed to get task {task_id} by generalId: {api_err}, trying to find in BotLog")
+                # Пробуем найти generalId в BotLog
+                try:
+                    from database import BotLog
+                    with self.db_manager.get_db() as db:
+                        bot_logs = db.query(BotLog).filter(
+                            BotLog.action == "create_task",
+                            BotLog.success == True
+                        ).order_by(BotLog.id.desc()).limit(50).all()
+                        
+                        for log in bot_logs:
+                            if not log.details:
+                                continue
+                            
+                            # Проверяем все возможные ID
+                            log_task_id = log.details.get('task_id')
+                            log_internal_id = log.details.get('task_id_internal')
+                            
+                            # Нормализуем для сравнения
+                            log_id_int = None
+                            if log_internal_id:
+                                try:
+                                    log_id_int = int(log_internal_id)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            if not log_id_int and log_task_id:
+                                try:
+                                    log_id_int = int(log_task_id)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            if log_id_int == task_id:
+                                general_id = log.details.get('task_id_general') or log.details.get('task_id')
+                                if general_id:
+                                    try:
+                                        general_id_int = int(general_id)
+                                        logger.info(f"Found generalId {general_id_int} for task {task_id} in BotLog, retrying API call")
+                                        task_response = await planfix_client.get_task_by_id(
+                                            general_id_int,
+                                            fields="id,name,description,status,template,counterparty,tags,dataTags,project"
+                                        )
+                                        break
+                                    except Exception:
+                                        pass
+                except Exception as log_err:
+                    logger.warning(f"Error searching BotLog for task {task_id}: {log_err}")
             
             if not task_response or task_response.get('result') != 'success':
-                logger.warning(f"Could not get task {task_id} for executor notification")
+                logger.warning(f"❌ Could not get task {task_id} for executor notification (response: {task_response})")
                 return
             
             task = task_response.get('task', {})
