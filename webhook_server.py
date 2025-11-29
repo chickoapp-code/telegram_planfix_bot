@@ -929,18 +929,35 @@ class PlanfixWebhookHandler:
         Используется для повторной отправки уведомлений исполнителям.
         """
         try:
+            logger.info(f"🔔 Processing task.reminder webhook. Data: {json.dumps(data, ensure_ascii=False, indent=2)}")
+            
             task = data.get('task', {})
+            if not task:
+                logger.warning(f"⚠️ No 'task' field in reminder webhook. Data keys: {list(data.keys())}")
+                return
+            
             task_id_raw = task.get('id')
             
             if not task_id_raw:
-                logger.warning(f"Incomplete task data in reminder webhook: {data}")
+                logger.warning(f"⚠️ Incomplete task data in reminder webhook: task object keys: {list(task.keys())}, full data: {json.dumps(data, ensure_ascii=False)}")
                 return
             
+            logger.info(f"📋 Task reminder: raw task_id={task_id_raw}, type={type(task_id_raw)}")
+            
             # Преобразуем task_id в int, если это строка
+            # Может быть "task:123" или просто "123" или число
             try:
-                task_id = int(task_id_raw) if isinstance(task_id_raw, str) else task_id_raw
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid task_id format in reminder: {task_id_raw}")
+                if isinstance(task_id_raw, str):
+                    # Если это строка вида "task:123" или "user:123", извлекаем число
+                    if ':' in task_id_raw:
+                        task_id = int(task_id_raw.split(':')[-1])
+                    else:
+                        task_id = int(task_id_raw)
+                else:
+                    task_id = int(task_id_raw)
+                logger.info(f"✅ Task reminder: normalized task_id={task_id}")
+            except (ValueError, TypeError) as e:
+                logger.error(f"❌ Invalid task_id format in reminder: {task_id_raw} (type: {type(task_id_raw)}), error: {e}")
                 return
             
             # Если в вебхуке недостаточно данных (только id), получаем задачу через API
@@ -964,9 +981,15 @@ class PlanfixWebhookHandler:
                     logger.warning(f"Task {task_id} reminder: error fetching task from API: {api_err}, using webhook data")
             
             # Фильтруем только релевантные задачи
-            if not self._should_process_task(task_data_from_webhook):
-                logger.debug(f"Task {task_id} reminder skipped by filter")
-                return
+            # Для reminder может не быть полных данных, поэтому проверяем после получения полных данных
+            if task_data_from_webhook.get('process') or task_data_from_webhook.get('status'):
+                # Есть данные для фильтрации
+                if not self._should_process_task(task_data_from_webhook):
+                    logger.info(f"Task {task_id} reminder skipped by filter (process/status check)")
+                    return
+            else:
+                # Нет данных для фильтрации, пропускаем фильтр (задача будет проверена позже)
+                logger.debug(f"Task {task_id} reminder: skipping filter check (no process/status data yet)")
             
             # Проверяем, что задача еще не взята в работу
             # 1. Проверяем статус задачи (согласно swagger.json, статус - объект {"id": 4, "name": "В работе"})
@@ -1022,7 +1045,11 @@ class PlanfixWebhookHandler:
             
             # Задача не взята в работу - отправляем повторные уведомления
             logger.info(f"🔔 Reminder for unassigned task {task_id} - resending notifications to executors")
-            await self.task_notification_service.notify_executors_about_new_task(task_id)
+            try:
+                await self.task_notification_service.notify_executors_about_new_task(task_id)
+                logger.info(f"✅ Successfully sent reminder notifications for task {task_id}")
+            except Exception as notify_err:
+                logger.error(f"❌ Error sending reminder notifications for task {task_id}: {notify_err}", exc_info=True)
             
         except Exception as e:
             logger.error(f"Error handling task reminder: {e}", exc_info=True)
@@ -1220,6 +1247,7 @@ async def webhook_handler(request):
             await handler.handle_comment_added(data)
         elif event_type == 'task.reminder' or event_type == 'task.remind':
             # Обработка напоминаний о задачах, которые еще не взяты в работу
+            logger.info(f"🔔 Received task.reminder webhook: {json.dumps(data, ensure_ascii=False)}")
             await handler.handle_task_reminder(data)
         else:
             logger.warning(f"Unknown event type: {event_type}")
