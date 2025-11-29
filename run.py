@@ -267,32 +267,33 @@ async def main():
         logger.info("Application stopped.")
 
 
+# Глобальный флаг для graceful shutdown
+_shutdown_flag = False
+
 def setup_signal_handlers():
     """Настраивает обработчики сигналов для корректного завершения."""
-    loop = asyncio.get_event_loop()
-    shutdown_event = asyncio.Event()
+    global _shutdown_flag
     
-    def signal_handler(sig):
+    def signal_handler(sig, frame):
         logger.info(f"Received signal {sig}, initiating graceful shutdown...")
-        shutdown_event.set()
+        _shutdown_flag = True
     
     # Обработка SIGTERM (от systemd) и SIGINT (Ctrl+C)
+    # Используем signal.signal() вместо loop.add_signal_handler() для совместимости
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+        signal.signal(sig, signal_handler)
     
-    return shutdown_event
+    return None  # Возвращаем None, так как используем глобальный флаг
 
 
 if __name__ == "__main__":
     # Настраиваем обработчики сигналов только в Linux
     if sys.platform != 'win32':
         try:
-            shutdown_event = setup_signal_handlers()
+            setup_signal_handlers()
         except NotImplementedError:
-            # Windows не поддерживает add_signal_handler
-            shutdown_event = None
-    else:
-        shutdown_event = None
+            # Windows не поддерживает signal handlers
+            pass
     
     try:
         asyncio.run(main())
