@@ -97,10 +97,13 @@ def _get_allowed_tags(executor: ExecutorProfile) -> Set[str]:
 
 
 def _extract_task_tags(task: dict) -> Set[str]:
-    """Извлекает множество тегов задачи в нижнем регистре."""
-    tags_field = task.get('tags')
+    """Извлекает множество тегов задачи в нижнем регистре.
+    Проверяет как поле 'tags', так и 'dataTags' (для совместимости с разными версиями API).
+    """
     names: Set[str] = set()
     
+    # Проверяем поле 'tags'
+    tags_field = task.get('tags')
     if isinstance(tags_field, list):
         for tag in tags_field:
             if isinstance(tag, str):
@@ -120,6 +123,23 @@ def _extract_task_tags(task: dict) -> Set[str]:
         name = tags_field.strip()
         if name:
             names.add(name.lower())
+    
+    # Проверяем поле 'dataTags' (альтернативный формат)
+    data_tags_field = task.get('dataTags')
+    if isinstance(data_tags_field, list):
+        for data_tag_entry in data_tags_field:
+            if isinstance(data_tag_entry, dict):
+                data_tag = data_tag_entry.get('dataTag', {})
+                if isinstance(data_tag, dict):
+                    tag_name = (
+                        data_tag.get('name')
+                        or data_tag.get('value')
+                        or ""
+                    ).strip()
+                    if tag_name:
+                        names.add(tag_name.lower())
+                elif isinstance(data_tag, str):
+                    names.add(data_tag.lower())
     
     return names
 
@@ -143,7 +163,7 @@ class TaskNotificationService:
             # Получаем информацию о задаче
             task_response = await planfix_client.get_task_by_id(
                 task_id,
-                fields="id,name,description,status,template,counterparty,tags,project"
+                fields="id,name,description,status,template,counterparty,tags,dataTags,project"
             )
             
             if not task_response or task_response.get('result') != 'success':
@@ -297,25 +317,40 @@ class TaskNotificationService:
                         continue
                 
                 # Фильтр 3: Теги задачи должны пересекаться с разрешенными тегами исполнителя
-                # ВАЖНО: Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь соответствующий тег
+                # ИСКЛЮЧЕНИЕ: если шаблон правильный, но тега нет - отправляем уведомление (теги в шаблоне)
                 allowed_tags = _get_allowed_tags(executor)
                 allowed_tag_names = {tag.lower() for tag in allowed_tags if isinstance(tag, str)}
                 if allowed_tag_names:
-                    # Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь один из разрешенных тегов
-                    if not task_tags:
-                        # У задачи нет тегов, но у исполнителя есть ограничения - отфильтровываем
-                        logger.debug(
-                            f"Executor {executor.telegram_id} filtered out: "
-                            f"task has no tags, but executor requires tags: {allowed_tag_names}"
-                        )
-                        continue
-                    elif not (task_tags & allowed_tag_names):
-                        # У задачи есть теги, но они не совпадают с разрешенными
-                        logger.debug(
-                            f"Executor {executor.telegram_id} filtered out: "
-                            f"task tags {task_tags} don't match allowed tags {allowed_tag_names}"
-                        )
-                        continue
+                    if task_tags:
+                        # У задачи есть теги - проверяем соответствие
+                        if not (task_tags & allowed_tag_names):
+                            # У задачи есть теги, но они не совпадают с разрешенными
+                            logger.debug(
+                                f"Executor {executor.telegram_id} filtered out: "
+                                f"task tags {task_tags} don't match allowed tags {allowed_tag_names}"
+                            )
+                            continue
+                        else:
+                            logger.debug(
+                                f"Executor {executor.telegram_id} passed tag filter: "
+                                f"task tags {task_tags} match allowed tags {allowed_tag_names}"
+                            )
+                    else:
+                        # У задачи нет тегов - проверяем, соответствует ли шаблон
+                        # Если шаблон правильный, отправляем уведомление (теги в шаблоне задачи)
+                        if template_id in allowed_templates:
+                            logger.debug(
+                                f"Executor {executor.telegram_id} passed tag filter: "
+                                f"no tags but template_id={template_id} matches allowed_templates "
+                                f"(tags are in template)"
+                            )
+                        else:
+                            # Шаблон не соответствует, и тегов нет - отфильтровываем
+                            logger.debug(
+                                f"Executor {executor.telegram_id} filtered out: "
+                                f"task has no tags and template_id={template_id} not in allowed_templates={allowed_templates}"
+                            )
+                            continue
                 
                 # Все фильтры пройдены - отправляем уведомление
                 try:

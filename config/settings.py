@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
     webhook_secret: str | None = Field(default=None, alias="PLANFIX_WEBHOOK_SECRET")
     webhook_max_body_size: int = Field(default=10 * 1024 * 1024, alias="WEBHOOK_MAX_BODY_SIZE")  # 10 MB
+    webhook_username: str | None = Field(default=None, alias="PLANFIX_WEBHOOK_USERNAME")
+    webhook_password: str | None = Field(default=None, alias="PLANFIX_WEBHOOK_PASSWORD")
 
     telegram_admin_ids_raw: str | None = Field(default=None, alias="TELEGRAM_ADMIN_IDS", exclude=True)
     

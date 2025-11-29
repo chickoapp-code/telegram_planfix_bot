@@ -247,9 +247,13 @@ def _get_allowed_tags(executor) -> Set[str]:
 
 
 def _extract_task_tags(task: dict) -> Set[str]:
-    """Извлекает множество тегов задачи в нижнем регистре."""
-    tags_field = task.get('tags')
+    """Извлекает множество тегов задачи в нижнем регистре.
+    Проверяет как поле 'tags', так и 'dataTags' (для совместимости с разными версиями API).
+    """
     names: Set[str] = set()
+    
+    # Проверяем поле 'tags'
+    tags_field = task.get('tags')
     if isinstance(tags_field, list):
         for tag in tags_field:
             if isinstance(tag, str):
@@ -269,6 +273,24 @@ def _extract_task_tags(task: dict) -> Set[str]:
         name = tags_field.strip()
         if name:
             names.add(name.lower())
+    
+    # Проверяем поле 'dataTags' (альтернативный формат)
+    data_tags_field = task.get('dataTags')
+    if isinstance(data_tags_field, list):
+        for data_tag_entry in data_tags_field:
+            if isinstance(data_tag_entry, dict):
+                data_tag = data_tag_entry.get('dataTag', {})
+                if isinstance(data_tag, dict):
+                    tag_name = (
+                        data_tag.get('name')
+                        or data_tag.get('value')
+                        or ""
+                    ).strip()
+                    if tag_name:
+                        names.add(tag_name.lower())
+                elif isinstance(data_tag, str):
+                    names.add(data_tag.lower())
+    
     return names
 
 
@@ -1602,8 +1624,8 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 status_ids_to_query = [None]
 
             page_size = 50
-            max_pages_per_status = 1  # Оптимизация: запрашиваем только первую страницу для быстрой загрузки
-            max_total_tasks = 50  # Максимальное количество задач для обработки
+            max_pages_per_status = 3  # Увеличиваем количество страниц, чтобы найти недавно созданные задачи
+            max_total_tasks = 150  # Увеличиваем лимит задач для обработки
 
             for status_id in status_ids_to_query:
                 offset = 0
@@ -1641,23 +1663,36 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         f"Querying tasks with status_id={status_id}, offset={offset}, page_size={page_size}, date_from={date_from}"
                     )
 
-                    # Проверяем кэш запроса к API
+                    # Проверяем кэш запроса к API (отключаем кэш для первой страницы, чтобы видеть новые задачи)
                     api_cache_key = f"api_tasks:{status_id}:{offset}:{page_size}:{date_from}"
-                    cached_api_response = cache.get(api_cache_key)
-                    if cached_api_response:
-                        logger.debug(f"Using cached API response for {api_cache_key}")
-                        tasks_response = cached_api_response
-                    else:
+                    tasks_response = None
+                    # Для первой страницы не используем кэш, чтобы видеть новые задачи
+                    if offset == 0:
+                        logger.debug(f"Skipping cache for first page to see new tasks")
                         tasks_response = await planfix_client.get_task_list(
                             filters=filters,
-                            fields="id,name,description,status,template,counterparty,dateTime,tags,project",
+                            fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
                             page_size=page_size,
                             offset=offset,
                             result_order=[{"field": "dateTime", "direction": "Desc"}]
                         )
-                        # Кэшируем результат API запроса на 30 секунд
-                        if tasks_response and tasks_response.get('result') == 'success':
-                            cache.set(api_cache_key, tasks_response, ttl_seconds=30)
+                    else:
+                        # Для последующих страниц используем кэш
+                        cached_api_response = cache.get(api_cache_key)
+                        if cached_api_response:
+                            logger.debug(f"Using cached API response for {api_cache_key}")
+                            tasks_response = cached_api_response
+                        else:
+                            tasks_response = await planfix_client.get_task_list(
+                                filters=filters,
+                                fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
+                                page_size=page_size,
+                                offset=offset,
+                                result_order=[{"field": "dateTime", "direction": "Desc"}]
+                            )
+                            # Кэшируем результат API запроса на 30 секунд
+                            if tasks_response and tasks_response.get('result') == 'success':
+                                cache.set(api_cache_key, tasks_response, ttl_seconds=30)
 
                     # Детальное логирование ответа для диагностики
                     if tasks_response:

@@ -157,6 +157,8 @@ SUPPORT_CONTACT_TEMPLATE_ID = settings.support_contact_template_id
 
 # Webhook configuration
 PLANFIX_WEBHOOK_SECRET = settings.webhook_secret
+PLANFIX_WEBHOOK_USERNAME = settings.webhook_username
+PLANFIX_WEBHOOK_PASSWORD = settings.webhook_password
 WEBHOOK_MAX_BODY_SIZE = settings.webhook_max_body_size
 
 _TEMPLATE_REGISTRY: Dict[int, Dict[str, object]] = {
@@ -332,6 +334,8 @@ __all__ = [
     "SUPPORT_CONTACT_GROUP_ID",
     "SUPPORT_CONTACT_TEMPLATE_ID",
     "PLANFIX_WEBHOOK_SECRET",
+    "PLANFIX_WEBHOOK_USERNAME",
+    "PLANFIX_WEBHOOK_PASSWORD",
     "WEBHOOK_MAX_BODY_SIZE",
 ]
 

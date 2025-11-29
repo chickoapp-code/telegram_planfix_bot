@@ -15,7 +15,15 @@ from typing import Optional, Set
 from aiohttp import web
 from aiogram import Bot
 
-from config import BOT_TOKEN, FRANCHISE_GROUPS, PLANFIX_TASK_PROCESS_ID, PLANFIX_WEBHOOK_SECRET, WEBHOOK_MAX_BODY_SIZE
+from config import (
+    BOT_TOKEN,
+    FRANCHISE_GROUPS,
+    PLANFIX_TASK_PROCESS_ID,
+    PLANFIX_WEBHOOK_SECRET,
+    PLANFIX_WEBHOOK_USERNAME,
+    PLANFIX_WEBHOOK_PASSWORD,
+    WEBHOOK_MAX_BODY_SIZE,
+)
 from db_manager import DBManager
 from keyboards import get_executor_main_menu_keyboard
 from logging_config import setup_logging
@@ -1099,6 +1107,41 @@ class PlanfixWebhookHandler:
 async def webhook_handler(request):
     """Обработчик входящих webhook от Planfix."""
     try:
+        # Проверка HTTP Basic Authentication (если настроены логин и пароль)
+        if PLANFIX_WEBHOOK_USERNAME and PLANFIX_WEBHOOK_PASSWORD:
+            import base64
+            auth_header = request.headers.get('Authorization', '')
+            if not auth_header.startswith('Basic '):
+                logger.warning("Webhook authentication required but no Basic Auth header found")
+                return web.Response(
+                    text='Authentication required',
+                    status=401,
+                    headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+                )
+            
+            try:
+                # Декодируем Basic Auth
+                encoded = auth_header.split(' ', 1)[1]
+                decoded = base64.b64decode(encoded).decode('utf-8')
+                username, password = decoded.split(':', 1)
+                
+                # Проверяем учетные данные
+                if username != PLANFIX_WEBHOOK_USERNAME or password != PLANFIX_WEBHOOK_PASSWORD:
+                    logger.warning(f"Invalid webhook credentials: username={username}")
+                    return web.Response(
+                        text='Invalid credentials',
+                        status=401,
+                        headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+                    )
+                logger.debug(f"Webhook Basic Auth successful for user: {username}")
+            except Exception as auth_err:
+                logger.warning(f"Error processing Basic Auth: {auth_err}")
+                return web.Response(
+                    text='Authentication error',
+                    status=401,
+                    headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+                )
+        
         # Получаем сырое тело запроса для диагностики
         raw_body = await request.read()
         
