@@ -1031,9 +1031,13 @@ class PlanfixWebhookHandler:
             if needs_full_data:
                 logger.debug(f"Task {task_id} reminder: fetching full task data from API (webhook missing some fields)")
                 try:
+                    # ВАЖНО: Используем generalId для запроса к API, так как внутренний id может не работать
+                    api_task_id = task_number_from_webhook if task_number_from_webhook else task_id
+                    logger.info(f"Task {task_id} reminder: using {api_task_id} (generalId={task_number_from_webhook}) for API request")
+                    
                     # Запрашиваем все необходимые поля, включая шаблон, теги и номер
                     task_response = await planfix_client.get_task_by_id(
-                        task_id,
+                        int(api_task_id) if api_task_id else task_id,
                         fields="id,generalId,status,assignees,process,project,template.id,tags"
                     )
                     if task_response and task_response.get('result') == 'success':
@@ -1090,10 +1094,12 @@ class PlanfixWebhookHandler:
                     return
             
             # 2. Проверяем наличие активных назначений в БД
+            # Используем generalId для проверки в БД, если он доступен
+            db_task_id = int(task_number_from_webhook) if task_number_from_webhook else task_id
             with self.db_manager.get_db() as db:
                 from database import TaskAssignment
                 active_assignments = db.query(TaskAssignment).filter(
-                    TaskAssignment.task_id == task_id,
+                    TaskAssignment.task_id == db_task_id,
                     TaskAssignment.status == "active"
                 ).count()
                 
@@ -1117,10 +1123,12 @@ class PlanfixWebhookHandler:
                 return
             
             # Задача не взята в работу - отправляем повторные уведомления
-            logger.info(f"🔔 Reminder for unassigned task {task_id} - resending notifications to executors")
+            # Используем generalId для уведомлений, если он доступен
+            notification_task_id = int(task_number_from_webhook) if task_number_from_webhook else task_id
+            logger.info(f"🔔 Reminder for unassigned task {task_id} (generalId={task_number_from_webhook}) - resending notifications to executors")
             try:
-                await self.task_notification_service.notify_executors_about_new_task(task_id)
-                logger.info(f"✅ Successfully sent reminder notifications for task {task_id}")
+                await self.task_notification_service.notify_executors_about_new_task(notification_task_id)
+                logger.info(f"✅ Successfully sent reminder notifications for task {notification_task_id}")
             except Exception as notify_err:
                 logger.error(f"❌ Error sending reminder notifications for task {task_id}: {notify_err}", exc_info=True)
             
