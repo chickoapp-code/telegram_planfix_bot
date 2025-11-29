@@ -1780,24 +1780,34 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         seen_task_ids.add(task_id)
                         
                         # Фильтр по тегам: если у исполнителя есть ограничения, задача ДОЛЖНА иметь соответствующий тег
+                        # ИСКЛЮЧЕНИЕ: если шаблон правильный, но тега нет - показываем (для обратной совместимости)
                         if allowed_tag_names:
-                            # Если у исполнителя есть ограничения по тегам, задача ОБЯЗАТЕЛЬНО должна иметь один из разрешенных тегов
-                            if not task_tag_names:
-                                # У задачи нет тегов, но у исполнителя есть ограничения - отфильтровываем
-                                logger.info(
-                                    f"Task {task_id} filtered out by tag filter: "
-                                    f"task has no tags, but executor requires tags: {allowed_tag_names}"
-                                )
-                                continue
-                            elif not (task_tag_names & allowed_tag_names):
-                                # У задачи есть теги, но они не совпадают с разрешенными
-                                logger.info(
-                                    f"Task {task_id} filtered out by tag filter: "
-                                    f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
-                                )
-                                continue
+                            if task_tag_names:
+                                # У задачи есть теги - проверяем соответствие
+                                if not (task_tag_names & allowed_tag_names):
+                                    # У задачи есть теги, но они не совпадают с разрешенными
+                                    logger.info(
+                                        f"Task {task_id} filtered out by tag filter: "
+                                        f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
+                                    )
+                                    continue
+                                else:
+                                    logger.debug(f"Task {task_id} passed tag filter: task_tags={task_tag_names} match allowed_tags={allowed_tag_names}")
                             else:
-                                logger.debug(f"Task {task_id} passed tag filter: task_tags={task_tag_names} match allowed_tags={allowed_tag_names}")
+                                # У задачи нет тегов - проверяем, соответствует ли шаблон
+                                # Если шаблон правильный, показываем задачу (для обратной совместимости со старыми задачами)
+                                if template_id in allowed_templates:
+                                    logger.debug(
+                                        f"Task {task_id} passed tag filter: no tags but template_id={template_id} matches allowed_templates "
+                                        f"(backward compatibility for old tasks)"
+                                    )
+                                else:
+                                    # Шаблон не соответствует, и тегов нет - отфильтровываем
+                                    logger.info(
+                                        f"Task {task_id} filtered out by tag filter: "
+                                        f"task has no tags and template_id={template_id} not in allowed_templates={allowed_templates}"
+                                    )
+                                    continue
                         else:
                             # Если у исполнителя нет ограничений по тегам - пропускаем фильтр
                             logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")

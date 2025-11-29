@@ -1042,6 +1042,14 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             template_direction = get_template_direction(template_id)
             task_tag = get_direction_tag(template_direction)
             
+            # Формируем теги для задачи (если определено направление)
+            task_tags = None
+            if task_tag:
+                task_tags = [task_tag]  # Передаем как список строк
+                logger.info(f"Task will be created with tag: {task_tag} (direction: {template_direction})")
+            else:
+                logger.warning(f"No tag determined for template {template_id} (direction: {template_direction})")
+            
             # ОПТИМИЗАЦИЯ: Создаем задачу с минимальными обязательными полями, затем обновляем остальные
             # Это быстрее, чем множественные попытки с разными вариантами
             create_response = None
@@ -1063,7 +1071,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     counterparty_id=int(user.restaurant_contact_id),
                     custom_field_data=required_fields_only,
                     files=None,  # Файлы добавим после создания
-                    tags=None
+                    tags=task_tags  # Передаем тег в зависимости от направления шаблона
                 )
             except Exception as e:
                 logger.error(f"Failed to create task: {e}", exc_info=True)
