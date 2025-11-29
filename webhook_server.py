@@ -1014,6 +1014,49 @@ class PlanfixWebhookHandler:
             # Пытаемся извлечь номер задачи из webhook
             task_number_from_webhook = task.get('generalId') or task.get('number') or task.get('task.number')
             
+            # Если generalId нет в webhook, пытаемся найти его в BotLog по внутреннему id
+            if not task_number_from_webhook:
+                logger.debug(f"Task {task_id} reminder: generalId not in webhook, searching in BotLog")
+                try:
+                    with self.db_manager.get_db() as db:
+                        from database import BotLog
+                        # Ищем задачу в BotLog по внутреннему id
+                        bot_logs = db.query(BotLog).filter(
+                            BotLog.action == "create_task",
+                            BotLog.success == True
+                        ).order_by(BotLog.id.desc()).limit(100).all()
+                        
+                        for log in bot_logs:
+                            if not log.details:
+                                continue
+                            
+                            # Проверяем все возможные ID в BotLog
+                            log_internal_id = log.details.get('task_id_internal')
+                            log_task_id = log.details.get('task_id')
+                            
+                            # Нормализуем ID из лога для сравнения
+                            log_id_to_check = None
+                            if log_internal_id:
+                                try:
+                                    log_id_to_check = int(log_internal_id)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            if not log_id_to_check and log_task_id:
+                                try:
+                                    log_id_to_check = int(log_task_id)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            # Если нашли совпадение, берем generalId
+                            if log_id_to_check == task_id:
+                                task_number_from_webhook = log.details.get('task_id_general') or log.details.get('task_id')
+                                if task_number_from_webhook:
+                                    logger.info(f"Task {task_id} reminder: found generalId {task_number_from_webhook} in BotLog")
+                                    break
+                except Exception as log_err:
+                    logger.warning(f"Task {task_id} reminder: error searching BotLog for generalId: {log_err}")
+            
             # Пытаемся извлечь теги из webhook
             tags_from_webhook = task.get('tags') or task.get('task.tags') or []
             
@@ -1030,14 +1073,25 @@ class PlanfixWebhookHandler:
             
             if needs_full_data:
                 logger.debug(f"Task {task_id} reminder: fetching full task data from API (webhook missing some fields)")
+                
+                # ВАЖНО: Используем generalId для запроса к API, так как внутренний id может не работать
+                api_task_id = None
+                if task_number_from_webhook:
+                    try:
+                        api_task_id = int(task_number_from_webhook)
+                        logger.info(f"Task {task_id} reminder: using generalId {api_task_id} for API request")
+                    except (ValueError, TypeError):
+                        logger.warning(f"Task {task_id} reminder: invalid generalId format: {task_number_from_webhook}")
+                
+                # Если generalId не найден, пробуем использовать внутренний id (может не сработать)
+                if not api_task_id:
+                    logger.warning(f"Task {task_id} reminder: generalId not found, trying internal id (may fail)")
+                    api_task_id = task_id
+                
                 try:
-                    # ВАЖНО: Используем generalId для запроса к API, так как внутренний id может не работать
-                    api_task_id = task_number_from_webhook if task_number_from_webhook else task_id
-                    logger.info(f"Task {task_id} reminder: using {api_task_id} (generalId={task_number_from_webhook}) for API request")
-                    
                     # Запрашиваем все необходимые поля, включая шаблон, теги и номер
                     task_response = await planfix_client.get_task_by_id(
-                        int(api_task_id) if api_task_id else task_id,
+                        api_task_id,
                         fields="id,generalId,status,assignees,process,project,template.id,tags"
                     )
                     if task_response and task_response.get('result') == 'success':
@@ -1051,9 +1105,9 @@ class PlanfixWebhookHandler:
                             task_number_from_webhook = task_data_from_webhook.get('generalId') or task_data_from_webhook.get('id')
                         if not tags_from_webhook:
                             tags_from_webhook = task_data_from_webhook.get('tags', [])
-                        logger.debug(f"Task {task_id} reminder: got full task data from API")
+                        logger.info(f"Task {task_id} reminder: got full task data from API (generalId={task_number_from_webhook})")
                     else:
-                        logger.warning(f"Task {task_id} reminder: failed to get task from API, using webhook data")
+                        logger.warning(f"Task {task_id} reminder: failed to get task from API (response: {task_response}), using webhook data")
                 except Exception as api_err:
                     logger.warning(f"Task {task_id} reminder: error fetching task from API: {api_err}, using webhook data")
             
