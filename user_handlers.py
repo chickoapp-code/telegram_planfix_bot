@@ -744,9 +744,131 @@ async def choose_template(callback_query: CallbackQuery, state: FSMContext):
     await state.set_state(TicketCreation.entering_description)
 
 
+@router.message(TicketCreation.entering_description, F.content_type == ContentType.PHOTO)
+async def enter_description_with_photo(message: Message, state: FSMContext):
+    """Обработка описания проблемы с фото в одном сообщении."""
+    # Получаем текст из подписи к фото или из предыдущего сообщения
+    description = message.caption or ""
+    description = description.strip()
+    
+    # Если описания нет в подписи, просим ввести его отдельно
+    if not description or len(description) < 10:
+        # Сохраняем file_id фото для последующей обработки
+        file_id = message.photo[-1].file_id
+        await state.update_data(has_photo=True, photo_file_id=file_id)
+        await message.answer(
+            "📷 <b>Фото получено!</b>\n\n"
+            "Теперь опишите проблему подробно (минимум 10 символов):"
+        )
+        # Остаемся в том же состоянии, чтобы получить описание
+        return
+    
+    # Если описание есть в подписи, обрабатываем фото и создаем заявку
+    try:
+        file_id = message.photo[-1].file_id
+        tg_file = await message.bot.get_file(file_id)
+        file_bytes = await message.bot.download_file(tg_file.file_path)
+        
+        # Загружаем в Planfix
+        upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+        
+        if upload_response and upload_response.get('result') == 'success':
+            planfix_file_id = upload_response.get('id')
+            # Нормализуем ID файла: убираем префикс если есть (например "file:4450782" -> 4450782)
+            if isinstance(planfix_file_id, str) and ':' in planfix_file_id:
+                try:
+                    planfix_file_id = int(planfix_file_id.split(':')[-1])
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not parse file_id: {planfix_file_id}")
+                    planfix_file_id = None
+            elif isinstance(planfix_file_id, (int, float)):
+                planfix_file_id = int(planfix_file_id)
+            else:
+                logger.warning(f"Unexpected file_id type: {type(planfix_file_id)}, value: {planfix_file_id}")
+                planfix_file_id = None
+            
+            if planfix_file_id:
+                await state.update_data(description=description, files=[planfix_file_id])
+                logger.info(f"Uploaded file {planfix_file_id} to Planfix with description")
+            else:
+                await state.update_data(description=description)
+                await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+        else:
+            logger.warning("Failed to upload file to Planfix")
+            await state.update_data(description=description)
+            await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+        
+        # Создаем заявку сразу
+        await finalize_create_task(message, state, message.from_user.id)
+        
+    except Exception as e:
+        logger.error(f"Error uploading photo: {e}", exc_info=True)
+        await state.update_data(description=description)
+        await message.answer("⚠️ Ошибка при загрузке фото, но заявка будет создана без него.")
+        await finalize_create_task(message, state, message.from_user.id)
+
+
 @router.message(TicketCreation.entering_description)
 async def enter_description(message: Message, state: FSMContext):
-    """Обработка описания проблемы."""
+    """Обработка описания проблемы (только текст)."""
+    # Проверяем, есть ли уже фото в состоянии (если пользователь отправил фото без подписи)
+    state_data = await state.get_data()
+    if state_data.get('has_photo') and state_data.get('photo_file_id'):
+        # Пользователь отправил фото без подписи, а теперь отправляет описание
+        description = message.text.strip()
+        
+        if len(description) < 10:
+            await message.answer(
+                "❌ Описание слишком короткое.\n\n"
+                "Пожалуйста, опишите проблему подробнее (минимум 10 символов):"
+            )
+            return
+        
+        # Обрабатываем фото из предыдущего сообщения
+        photo_file_id = state_data['photo_file_id']
+        try:
+            tg_file = await message.bot.get_file(photo_file_id)
+            file_bytes = await message.bot.download_file(tg_file.file_path)
+            
+            # Загружаем в Planfix
+            upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+            
+            if upload_response and upload_response.get('result') == 'success':
+                planfix_file_id = upload_response.get('id')
+                # Нормализуем ID файла
+                if isinstance(planfix_file_id, str) and ':' in planfix_file_id:
+                    try:
+                        planfix_file_id = int(planfix_file_id.split(':')[-1])
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not parse file_id: {planfix_file_id}")
+                        planfix_file_id = None
+                elif isinstance(planfix_file_id, (int, float)):
+                    planfix_file_id = int(planfix_file_id)
+                else:
+                    planfix_file_id = None
+                
+                if planfix_file_id:
+                    await state.update_data(description=description, files=[planfix_file_id], has_photo=None, photo_file_id=None)
+                    logger.info(f"Uploaded file {planfix_file_id} to Planfix with description")
+                else:
+                    await state.update_data(description=description, has_photo=None, photo_file_id=None)
+                    await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+            else:
+                await state.update_data(description=description, has_photo=None, photo_file_id=None)
+                await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+            
+            # Создаем заявку сразу
+            await finalize_create_task(message, state, message.from_user.id)
+            return
+            
+        except Exception as e:
+            logger.error(f"Error uploading photo: {e}", exc_info=True)
+            await state.update_data(description=description, has_photo=None, photo_file_id=None)
+            await message.answer("⚠️ Ошибка при загрузке фото, но заявка будет создана без него.")
+            await finalize_create_task(message, state, message.from_user.id)
+            return
+    
+    # Обычный случай: только текст без фото
     description = message.text.strip()
     
     if len(description) < 10:
@@ -1461,9 +1583,12 @@ async def list_my_tickets(message: Message, state: FSMContext):
 
         logger.info(f"Found {len(tasks)} tasks for user {message.from_user.id}")
 
-        # Отфильтруем неактивные статусы локально
-        final_status_ids = await planfix_client.get_terminal_status_ids(PLANFIX_TASK_PROCESS_ID)
-        logger.debug(f"Terminal status IDs: {final_status_ids}")
+        # Получаем ID статусов "Новая" и "В работе"
+        await ensure_status_registry_loaded()
+        new_status_id = require_status_id(StatusKey.NEW)
+        in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
+        allowed_status_ids = {new_status_id, in_progress_status_id}
+        logger.debug(f"Allowed status IDs for 'Мои заявки': {allowed_status_ids} (NEW={new_status_id}, IN_PROGRESS={in_progress_status_id})")
 
         def normalize_status_id(sid):
             if isinstance(sid, str) and ':' in sid:
@@ -1476,9 +1601,9 @@ async def list_my_tickets(message: Message, state: FSMContext):
             except (TypeError, ValueError):
                 return None
 
-        # Фильтруем только активные заявки (статус НЕ в терминальных)
+        # Фильтруем только заявки со статусами "Новая" и "В работе"
         # Также проверяем по названию статуса на случай если ID не совпадает
-        terminal_status_names = {'завершенная', 'completed', 'done', 'finished', 'отменена', 'canceled', 'cancelled', 'rejected'}
+        allowed_status_names = {'новая', 'new', 'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется'}
         
         active_tasks = []
         for t in tasks:
@@ -1487,10 +1612,10 @@ async def list_my_tickets(message: Message, state: FSMContext):
             status_name_lower = status_name.lower() if status_name else ''
             
             # Логируем для отладки
-            logger.debug(f"Task #{t['id']}: status_id={status_id}, status_name={status_name}, is_terminal_by_id={status_id in final_status_ids}, is_terminal_by_name={status_name_lower in terminal_status_names}")
+            logger.debug(f"Task #{t['id']}: status_id={status_id}, status_name={status_name}, is_allowed_by_id={status_id in allowed_status_ids}, is_allowed_by_name={status_name_lower in allowed_status_names}")
             
-            # Добавляем только если статус НЕ терминальный (проверяем и по ID, и по названию)
-            if status_id not in final_status_ids and status_name_lower not in terminal_status_names:
+            # Добавляем только если статус "Новая" или "В работе" (проверяем и по ID, и по названию)
+            if status_id in allowed_status_ids or status_name_lower in allowed_status_names:
                 active_tasks.append(t)
 
         if not active_tasks:
