@@ -2539,68 +2539,68 @@ async def show_my_tasks(message: Message, state: FSMContext):
                 )
                 return
         else:
-
-        tasks = []
-        for a in assignments:
-            try:
-                tr = await planfix_client.get_task_by_id(
-                    a.task_id,
-                    fields="id,name,status,statusId,project.id,project.name,counterparty.id,counterparty.name,dateTime"
-                )
-                if tr and tr.get('result') == 'success':
-                    t = tr.get('task', {})
-                    # Фильтруем финальные статусы (выполнена/завершена/отменена/отклонена)
-                    raw_status_id = t.get('status', {}).get('id')
-                    sid = None
-                    if isinstance(raw_status_id, int):
-                        sid = raw_status_id
-                    elif isinstance(raw_status_id, str):
-                        try:
-                            sid = int(str(raw_status_id).split(':')[-1])
-                        except Exception:
-                            sid = None
-                    if sid is None:
-                        alt_status_id = t.get('statusId') or t.get('status_id')
-                        if isinstance(alt_status_id, int):
-                            sid = alt_status_id
-                        elif isinstance(alt_status_id, str):
+            # Используем задачи из TaskAssignment
+            tasks = []
+            for a in assignments:
+                try:
+                    tr = await planfix_client.get_task_by_id(
+                        a.task_id,
+                        fields="id,name,status,statusId,project.id,project.name,counterparty.id,counterparty.name,dateTime"
+                    )
+                    if tr and tr.get('result') == 'success':
+                        t = tr.get('task', {})
+                        # Фильтруем финальные статусы (выполнена/завершена/отменена/отклонена)
+                        raw_status_id = t.get('status', {}).get('id')
+                        sid = None
+                        if isinstance(raw_status_id, int):
+                            sid = raw_status_id
+                        elif isinstance(raw_status_id, str):
                             try:
-                                sid = int(str(alt_status_id).split(':')[-1])
+                                sid = int(str(raw_status_id).split(':')[-1])
                             except Exception:
                                 sid = None
-                    final_status_ids = set(
-                        collect_status_ids(
-                            (
-                                StatusKey.COMPLETED,
-                                StatusKey.FINISHED,
-                                StatusKey.CANCELLED,
-                                StatusKey.REJECTED,
-                            ),
-                            required=False,
+                        if sid is None:
+                            alt_status_id = t.get('statusId') or t.get('status_id')
+                            if isinstance(alt_status_id, int):
+                                sid = alt_status_id
+                            elif isinstance(alt_status_id, str):
+                                try:
+                                    sid = int(str(alt_status_id).split(':')[-1])
+                                except Exception:
+                                    sid = None
+                        final_status_ids = set(
+                            collect_status_ids(
+                                (
+                                    StatusKey.COMPLETED,
+                                    StatusKey.FINISHED,
+                                    StatusKey.CANCELLED,
+                                    StatusKey.REJECTED,
+                                ),
+                                required=False,
+                            )
                         )
-                    )
-                    # Хеуристика по имени статуса (если ID недоступен/некорректен)
-                    sname_text = ((t.get('status', {}) or {}).get('name') or '').strip().lower()
-                    is_final_by_name = any(k in sname_text for k in ["выполн", "заверш", "отмен", "отклон"])
-                    if sid in final_status_ids or is_final_by_name:
-                        # Деакт��вируем локальное назначение, чтобы больше не показывать в списке
-                        try:
-                            from database import TaskAssignment
-                            with db_manager.get_db() as dbx:
-                                rec = dbx.query(TaskAssignment).filter(
-                                    TaskAssignment.task_id == a.task_id,
-                                    TaskAssignment.executor_telegram_id == executor.telegram_id,
-                                    TaskAssignment.status == "active"
-                                ).first()
-                                if rec:
-                                    rec.status = "inactive"
-                                    dbx.commit()
-                        except Exception:
-                            pass
-                        continue
-                    tasks.append(t)
-            except Exception:
-                continue
+                        # Хеуристика по имени статуса (если ID недоступен/некорректен)
+                        sname_text = ((t.get('status', {}) or {}).get('name') or '').strip().lower()
+                        is_final_by_name = any(k in sname_text for k in ["выполн", "заверш", "отмен", "отклон"])
+                        if sid in final_status_ids or is_final_by_name:
+                            # Деакт��вируем локальное назначение, чтобы больше не показывать в списке
+                            try:
+                                from database import TaskAssignment
+                                with db_manager.get_db() as dbx:
+                                    rec = dbx.query(TaskAssignment).filter(
+                                        TaskAssignment.task_id == a.task_id,
+                                        TaskAssignment.executor_telegram_id == executor.telegram_id,
+                                        TaskAssignment.status == "active"
+                                    ).first()
+                                    if rec:
+                                        rec.status = "inactive"
+                                        dbx.commit()
+                            except Exception:
+                                pass
+                            continue
+                        tasks.append(t)
+                except Exception:
+                    continue
 
         logger.info(f"Found {len(tasks)} accepted tasks for executor {message.from_user.id}")
 
