@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import socket
 import sys
 from typing import Optional
 
@@ -125,18 +126,61 @@ async def run_polling(bot: Bot, dp: Dispatcher):
         logger.info("✅ Polling stopped")
 
 
+def is_port_available(host: str, port: int) -> bool:
+    """Проверяет, доступен ли порт для использования."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            return result != 0  # Порт доступен, если соединение не удалось
+    except Exception:
+        return False
+
+
 async def run_both(bot: Bot, dp: Dispatcher, webhook_host: str = '127.0.0.1', webhook_port: int = 8080):
     """Запускает бота и webhook сервер одновременно."""
     logger.info("=" * 80)
     logger.info("🚀 Starting bot in polling mode + webhook server")
     logger.info("=" * 80)
     
+    # Проверяем доступность порта перед запуском
+    if not is_port_available(webhook_host, webhook_port):
+        logger.error("=" * 80)
+        logger.error(f"❌ Port {webhook_port} is already in use on {webhook_host}")
+        logger.error("=" * 80)
+        logger.error("💡 Solutions:")
+        logger.error(f"   1. Stop the process using port {webhook_port}:")
+        logger.error(f"      sudo lsof -ti:{webhook_port} | xargs kill -9")
+        logger.error(f"      OR: sudo netstat -tulpn | grep :{webhook_port}")
+        logger.error(f"   2. Use a different port:")
+        logger.error(f"      python main.py --webhook-port 8081")
+        logger.error(f"   3. Check if another instance of the bot is running:")
+        logger.error(f"      ps aux | grep 'python.*main.py'")
+        logger.error("=" * 80)
+        raise OSError(f"Port {webhook_port} is already in use on {webhook_host}")
+    
     # Создаем webhook приложение
     app = create_webhook_app(bot)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, webhook_host, webhook_port)
-    await site.start()
+    
+    try:
+        await site.start()
+    except OSError as e:
+        if e.errno == 98 or "address already in use" in str(e).lower():
+            logger.error("=" * 80)
+            logger.error(f"❌ Failed to bind to {webhook_host}:{webhook_port}")
+            logger.error(f"   Error: {e}")
+            logger.error("=" * 80)
+            logger.error("💡 Solutions:")
+            logger.error(f"   1. Stop the process using port {webhook_port}:")
+            logger.error(f"      sudo lsof -ti:{webhook_port} | xargs kill -9")
+            logger.error(f"      OR: sudo netstat -tulpn | grep :{webhook_port}")
+            logger.error(f"   2. Use a different port:")
+            logger.error(f"      python main.py --webhook-port 8081")
+            logger.error("=" * 80)
+        raise
     
     logger.info("=" * 80)
     logger.info(f"✅ Webhook server started on {webhook_host}:{webhook_port}")
