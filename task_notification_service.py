@@ -162,6 +162,7 @@ class TaskNotificationService:
         Args:
             task_id: ID задачи в Planfix
         """
+        logger.info(f"🔔 notify_executors_about_new_task CALLED for task_id={task_id}")
         try:
             logger.info(f"📨 Starting notification process for task {task_id}")
             # Получаем информацию о задаче
@@ -325,10 +326,12 @@ class TaskNotificationService:
                     logger.debug(f"Could not get counterparty name for task {task_id}: {name_err}")
             
             # Получаем всех активных исполнителей
+            logger.info(f"🔍 Fetching active executors from database for task {task_id}")
             with self.db_manager.get_db() as db:
                 executors = db.query(ExecutorProfile).filter(
                     ExecutorProfile.profile_status == "активен"
                 ).all()
+            logger.info(f"📊 Found {len(executors)} active executor(s) in database for task {task_id}")
             
             # Собираем всех подходящих исполнителей для автоматического назначения
             matching_executors = []
