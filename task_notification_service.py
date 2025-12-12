@@ -332,6 +332,7 @@ class TaskNotificationService:
             # Собираем всех подходящих исполнителей для автоматического назначения
             matching_executors = []
             assignee_contact_ids = []
+            assignee_user_ids = []
             
             for executor in executors:
                 # Применяем те же фильтры, что и в show_new_tasks
@@ -473,15 +474,33 @@ class TaskNotificationService:
                     except Exception as e:
                         logger.error(f"Error creating Planfix contact for executor {executor.telegram_id}: {e}", exc_info=True)
                 
-                # Добавляем contact_id в список для назначения
+                # Добавляем contact_id в список для назначения, иначе fallback на planfix_user_id
                 if planfix_contact_id:
                     assignee_contact_ids.append(planfix_contact_id)
                     logger.debug(f"Added executor {executor.telegram_id} (contact_id={planfix_contact_id}) to assignment list")
+                else:
+                    # Fallback: если нет контакта, но есть planfix_user_id (сотрудник), добавляем как user
+                    if executor.planfix_user_id:
+                        try:
+                            assignee_user_ids.append(int(str(executor.planfix_user_id)))
+                            logger.debug(f"Added executor {executor.telegram_id} (user_id={executor.planfix_user_id}) to assignment list as user")
+                        except Exception as e:
+                            logger.warning(f"Failed to add executor {executor.telegram_id} as user assignee: {e}")
+                    else:
+                        logger.warning(f"Executor {executor.telegram_id} has no Planfix contact_id or planfix_user_id; cannot auto-assign")
             
+            # Если нет подходящих исполнителей — логируем и выходим
+            if not matching_executors:
+                logger.warning(f"❌ No matching executors found for task {task_id}. Check filters (template, tags, restaurants, direction).")
+                return
+
             # Автоматически назначаем всех подходящих исполнителей в Planfix и меняем статус на "В работе"
-            if assignee_contact_ids:
+            if assignee_contact_ids or assignee_user_ids:
                 try:
-                    logger.info(f"Auto-assigning {len(assignee_contact_ids)} executor(s) to task {task_id} and setting status to IN_PROGRESS")
+                    logger.info(
+                        f"Auto-assigning executors to task {task_id} and setting status to IN_PROGRESS "
+                        f"(contacts={len(assignee_contact_ids)}, users={len(assignee_user_ids)})"
+                    )
                     
                     # Получаем ID статуса "В работе"
                     from services.status_registry import StatusKey, require_status_id, ensure_status_registry_loaded
@@ -489,7 +508,8 @@ class TaskNotificationService:
                     in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
                     
                     update_kwargs = {
-                        "assignee_contacts": assignee_contact_ids
+                        "assignee_contacts": assignee_contact_ids if assignee_contact_ids else None,
+                        "assignee_users": assignee_user_ids if assignee_user_ids else None,
                     }
                     
                     # Если статус "В работе" найден, устанавливаем его
