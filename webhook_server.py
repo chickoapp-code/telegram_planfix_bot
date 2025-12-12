@@ -586,6 +586,14 @@ class PlanfixWebhookHandler:
                         logger.warning(f"Could not determine status for registration task {task_id}, status data: {task.get('status', {})}")
             
             # Обрабатываем изменение статуса
+            # #region agent log
+            import json, os, time
+            log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"STATUS1","location":"webhook_server.py:589","message":"status change check","data":{"task_id":task_id,"old_status_id":old_status_id,"new_status_id":new_status_id,"status_obj":status_obj,"status_id_raw":status_id_raw},"timestamp":int(time.time()*1000)})+"\n")
+            except: pass
+            # #endregion
             if new_status_id != old_status_id:
                 # Обновляем кэш статуса
                 if new_status_id:
@@ -595,14 +603,39 @@ class PlanfixWebhookHandler:
                 
                 # Отправляем уведомление об изменении статуса (если это реальное изменение)
                 if old_status_id is not None and new_status_id is not None:
+                    # #region agent log
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"STATUS2","location":"webhook_server.py:597","message":"calling notify_task_status_changed","data":{"task_id":task_id,"old_status_id":old_status_id,"new_status_id":new_status_id},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                     try:
                         await self.notification_service.notify_task_status_changed(
                             task_id=task_id,
                             old_status_id=old_status_id,
                             new_status_id=new_status_id
                         )
+                        # #region agent log
+                        try:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"STATUS2","location":"webhook_server.py:604","message":"notify_task_status_changed completed","data":{"task_id":task_id},"timestamp":int(time.time()*1000)})+"\n")
+                        except: pass
+                        # #endregion
                     except Exception as e:
                         logger.error(f"Error notifying status change for task {task_id}: {e}")
+                        # #region agent log
+                        try:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"STATUS2","location":"webhook_server.py:605","message":"notify_task_status_changed failed","data":{"task_id":task_id,"error":str(e)},"timestamp":int(time.time()*1000)})+"\n")
+                        except: pass
+                        # #endregion
+            else:
+                # #region agent log
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"STATUS3","location":"webhook_server.py:615","message":"status not changed (same)","data":{"task_id":task_id,"status_id":new_status_id},"timestamp":int(time.time()*1000)})+"\n")
+                except: pass
+                # #endregion
                 
                 # Обрабатываем завершение задачи
                 if status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
@@ -1269,6 +1302,15 @@ async def webhook_handler(request):
         
         # Пытаемся распарсить данные в зависимости от Content-Type
         data = {}
+        # #region agent log
+        import json as json_module, os, time
+        log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+        webhook_start = time.time()
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"WEBHOOK1","location":"webhook_server.py:1304","message":"webhook received","data":{"method":request.method,"content_type":content_type,"body_length":len(raw_body)},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         
         if raw_body:
             try:
@@ -1345,6 +1387,12 @@ async def webhook_handler(request):
                         return obj
                     
                     data = normalize_webhook_data(data)
+                    # #region agent log
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json_module.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"WEBHOOK2","location":"webhook_server.py:1389","message":"webhook data parsed","data":{"event_type":data.get("event"),"task_id":data.get("task",{}).get("id") or data.get("task",{}).get("generalId")},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                 elif 'application/x-www-form-urlencoded' in content_type:
                     # Парсим form-urlencoded данные
                     from urllib.parse import parse_qs, unquote
@@ -1420,8 +1468,20 @@ async def webhook_handler(request):
             return web.Response(text='OK', status=200)
         
         if event_type == 'task.create':
+            # #region agent log
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"WEBHOOK3","location":"webhook_server.py:1465","message":"calling handle_task_created","data":{"event_type":event_type},"timestamp":int(time.time()*1000)})+"\n")
+            except: pass
+            # #endregion
             await handler.handle_task_created(data)
         elif event_type == 'task.update':
+            # #region agent log
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json_module.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"WEBHOOK3","location":"webhook_server.py:1467","message":"calling handle_task_updated","data":{"event_type":event_type},"timestamp":int(time.time()*1000)})+"\n")
+            except: pass
+            # #endregion
             await handler.handle_task_updated(data)
         elif event_type == 'comment.create':
             await handler.handle_comment_added(data)
@@ -1432,6 +1492,12 @@ async def webhook_handler(request):
             await handler.handle_task_reminder(data)
         else:
             logger.warning(f"Unknown event type: {event_type}")
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"webhook","hypothesisId":"WEBHOOK_TOTAL","location":"webhook_server.py:1478","message":"webhook processing completed","data":{"event_type":event_type,"duration_ms":(time.time()-webhook_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         
         return web.Response(text='OK', status=200)
     except Exception as e:

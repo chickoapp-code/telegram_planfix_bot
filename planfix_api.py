@@ -763,7 +763,8 @@ class PlanfixAPIClient:
             if users:
                 assignees_payload["users"] = users
         if assignee_groups:
-            groups = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups if group_id is not None]
+            # Согласно swagger.json, GroupRequest.id - это integer, не строка с префиксом
+            groups = [{"id": int(group_id)} for group_id in assignee_groups if group_id is not None]
             if groups:
                 assignees_payload["groups"] = groups
         if assignees_payload:
@@ -889,6 +890,14 @@ class PlanfixAPIClient:
         # Формируем структуру исполнителей (assignees) согласно требованиям Planfix
         # ВАЖНО: При передаче assignee_users, assignee_contacts или assignee_groups они полностью заменяют существующих
         # Согласно swagger.json, в assignees.users можно добавлять и user:ID, и contact:ID
+        # #region agent log
+        import os
+        log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"planfix_api.py:892","message":"update_task assignees input","data":{"task_id":task_id,"assignee_users":assignee_users,"assignee_contacts":assignee_contacts,"assignee_groups":assignee_groups,"existing_assignees":existing_assignees},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         if assignee_users or assignee_contacts or assignee_groups:
             assignees_payload = {}
             users_list = []
@@ -921,11 +930,18 @@ class PlanfixAPIClient:
                 assignees_payload["users"] = users_list
             
             if assignee_groups:
-                assignees_payload["groups"] = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups]
+                # Согласно swagger.json, GroupRequest.id - это integer, не строка с префиксом
+                assignees_payload["groups"] = [{"id": int(group_id)} for group_id in assignee_groups]
             
             # ВАЖНО: Устанавливаем assignees только если есть хотя бы один исполнитель
             if users_list or assignee_groups:
                 data["assignees"] = assignees_payload
+                # #region agent log
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"planfix_api.py:928","message":"assignees payload before API call","data":{"assignees_payload":assignees_payload,"users_list":users_list},"timestamp":int(time.time()*1000)})+"\n")
+                except: pass
+                # #endregion
         elif existing_assignees:
             # Сохраняем существующих исполнителей если новые не переданы
             data["assignees"] = existing_assignees
@@ -1082,7 +1098,23 @@ class PlanfixAPIClient:
         # Логируем полные данные обновления для отладки
         logger.debug(f"Updating task {task_id} with data: {json.dumps(data, ensure_ascii=False, indent=2)}")
         
-        return await self._request("POST", endpoint, data=data)
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"planfix_api.py:1099","message":"update_task API request data","data":{"task_id":task_id,"endpoint":endpoint,"data":data},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
+        
+        response = await self._request("POST", endpoint, data=data)
+        
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"planfix_api.py:1105","message":"update_task API response","data":{"task_id":task_id,"response":response},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
+        
+        return response
 
     async def get_task_list(self, filters=None, fields="id,name,description,status,project,counterparty,workers,dateOfLastUpdate", 
                            offset=0, page_size=100, filter_id: str | None = None, result_order: list | None = None):

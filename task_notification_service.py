@@ -531,6 +531,14 @@ class TaskNotificationService:
                 f"Found {len(matching_executors)} matching executor(s) for task {task_id}: "
                 f"contacts={len(assignee_contact_ids)}, users={len(assignee_user_ids)}"
             )
+            # #region agent log
+            import json, os, time
+            log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"task_notification_service.py:535","message":"matching executors collected","data":{"task_id":task_id,"matching_executors_count":len(matching_executors),"assignee_contact_ids":assignee_contact_ids,"assignee_user_ids":assignee_user_ids},"timestamp":int(time.time()*1000)})+"\n")
+            except: pass
+            # #endregion
             
             # Если есть подходящие исполнители, но нет ни contact_id, ни user_id — это проблема
             if matching_executors and not assignee_contact_ids and not assignee_user_ids:
@@ -571,10 +579,24 @@ class TaskNotificationService:
                     
                     # Используем внутренний ID для обновления задачи
                     logger.info(f"Calling update_task with task_id={task_id_for_update}, kwargs={update_kwargs}")
+                    # #region agent log
+                    import json, os, time
+                    log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"task_notification_service.py:573","message":"before update_task call","data":{"task_id_for_update":task_id_for_update,"task_internal_id":task_internal_id,"task_general_id":task_general_id,"assignee_contact_ids":assignee_contact_ids,"assignee_user_ids":assignee_user_ids,"update_kwargs":update_kwargs},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                     update_response = await planfix_client.update_task(
                         task_id_for_update,
                         **update_kwargs
                     )
+                    # #region agent log
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"task_notification_service.py:580","message":"after update_task call","data":{"task_id_for_update":task_id_for_update,"update_response":update_response},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                     
                     if update_response and update_response.get('result') == 'success':
                         total_assigned = len(assignee_contact_ids) + len(assignee_user_ids)

@@ -1019,6 +1019,15 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
     
     finalize_create_task._in_progress[user_id] = True
     
+    # #region agent log
+    import json, os, time
+    log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+    perf_start = time.time()
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF1","location":"user_handlers.py:1023","message":"finalize_create_task started","data":{"user_id":user_id},"timestamp":int(time.time()*1000)})+"\n")
+    except: pass
+    # #endregion
     try:
         user_data = await state.get_data()
         template_id = user_data.get('template_id')
@@ -1026,7 +1035,14 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
         files = user_data.get('files', [])
         
         # Получаем профиль пользователя
+        perf_step = time.time()
         user = await db_manager.get_user_profile(user_id)
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF1","location":"user_handlers.py:1030","message":"get_user_profile completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         
         if not user:
             await message.answer("❌ Профиль не найден. Пройдите регистрацию: /start")
@@ -1133,6 +1149,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             
             # Если контакт не создан, пытаемся создать его
             if not user_contact_id:
+                perf_step = time.time()
                 try:
                     logger.info(f"Creating Planfix contact for user {user_id} (contact not found)")
                     # Разделяем ФИО на имя и фамилию
@@ -1177,8 +1194,20 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                             logger.info(f"Created and saved Planfix contact {user_contact_id} for user {user_id}")
                     else:
                         logger.warning(f"Failed to create Planfix contact for user {user_id}: {contact_response}")
+                    # #region agent log
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF2","location":"user_handlers.py:1177","message":"create_contact completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                 except Exception as e:
                     logger.error(f"Error creating Planfix contact for user {user_id}: {e}", exc_info=True)
+                    # #region agent log
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF2","location":"user_handlers.py:1181","message":"create_contact failed","data":{"user_id":user_id,"error":str(e),"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
             
             # Заменяем значение поля CUSTOM_FIELD_CONTACT_ID на контакт заявителя
             if user_contact_id:
@@ -1258,6 +1287,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 # Создаем задачу с обязательными полями (быстрее и надежнее)
                 # ВАЖНО: Теги нельзя устанавливать при создании задачи (нет в TaskCreateRequest),
                 # поэтому создаем задачу без тегов, затем обновим её
+                perf_step = time.time()
                 create_response = await planfix_client.create_task(
                     name=task_name,
                     description=task_description,
@@ -1272,12 +1302,19 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 raise
             
             if create_response and create_response.get('result') == 'success':
+                # #region agent log
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF3","location":"user_handlers.py:1274","message":"create_task completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                except: pass
+                # #endregion
                 # create_task возвращает generalId в поле id
                 task_id_general = create_response.get('id') or create_response.get('task', {}).get('id')
                 logger.info(f"Task created successfully, generalId: {task_id_general}")
                 
                 # Пытаемся получить внутренний id задачи
                 task_id_internal = None
+                perf_step = time.time()
                 try:
                     # Запрашиваем задачу по generalId, чтобы получить внутренний id
                     task_info = await planfix_client.get_task_by_id(
@@ -1300,6 +1337,12 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                             logger.info(f"⚠️ Using returned id as internal: {task_id_internal}")
                 except Exception as id_err:
                     logger.warning(f"Could not get internal task_id: {id_err}, will use generalId")
+                # #region agent log
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF4","location":"user_handlers.py:1303","message":"get_task_by_id for internal_id completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                except: pass
+                # #endregion
                 
                 # Используем internal id если есть, иначе generalId
                 task_id = task_id_internal if task_id_internal else task_id_general
@@ -1324,9 +1367,16 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     update_kwargs["files"] = files
                 
                 if update_kwargs:
+                    perf_step = time.time()
                     try:
                         await planfix_client.update_task(task_id, **update_kwargs)
                         logger.info(f"✅ All remaining fields updated for task {task_id} (tags are in template, not added via API)")
+                        # #region agent log
+                        try:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF5","location":"user_handlers.py:1328","message":"update_task for remaining fields completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                        except: pass
+                        # #endregion
                     except Exception as update_error:
                         logger.warning(f"Failed to update remaining fields for task {task_id}: {update_error}")
                         # Пробуем обновить поля по отдельности (fallback)
@@ -1345,6 +1395,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 # Если нужна проверка, можно включить опционально через флаг
                 
                 # Отправляем уведомление подходящим исполнителям о новой заявке
+                perf_step = time.time()
                 try:
                     # Получаем project_id из созданной задачи (с полными полями)
                     # Используем более полный список полей для получения project
@@ -1398,8 +1449,15 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     # Если project_id все еще не найден, используем project_id из созданной задачи (может быть установлен шаблоном)
                     # Ждем немного, чтобы Planfix успел обработать задачу и установить project
                     if not project_id:
+                        perf_sleep_start = time.time()
                         try:
                             await asyncio.sleep(1.0)  # Увеличиваем задержку до 1 секунды
+                            # #region agent log
+                            try:
+                                with open(log_path, "a", encoding="utf-8") as f:
+                                    f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF6","location":"user_handlers.py:1402","message":"sleep 1.0s completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_sleep_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                            except: pass
+                            # #endregion
                             task_info_retry = await planfix_client.get_task_by_id(
                                 task_id,
                                 fields="id,project.id,project.name,project.process.id"
@@ -1569,6 +1627,12 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                                     logger.error(f"Failed to add files via comment: {comment_err}", exc_info=True)
                     except Exception as files_err:
                         logger.error(f"❌ Error adding files to task {task_id}: {files_err}", exc_info=True)
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_TOTAL","location":"user_handlers.py:1629","message":"finalize_create_task completed","data":{"user_id":user_id,"total_duration_ms":(time.time()-perf_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
                 
                 # Сохраняем привязку task_id -> telegram_id для последующих уведомлений
                 # Сохраняем оба ID для совместимости с разными форматами
@@ -1620,6 +1684,12 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
         # Снимаем флаг создания задачи
         if hasattr(finalize_create_task, '_in_progress'):
             finalize_create_task._in_progress[user_id] = False
+        # #region agent log
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_TOTAL","location":"user_handlers.py:1621","message":"finalize_create_task completed","data":{"user_id":user_id,"total_duration_ms":(time.time()-perf_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
     
     await state.clear()
 
