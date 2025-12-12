@@ -2258,6 +2258,25 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                                     logger.debug(f"Task {task_id} from BotLog filtered out: no tags and wrong template")
                                                                     continue
                                                         
+                                                        # ФИНАЛЬНАЯ ПРОВЕРКА: еще раз проверяем статус из TaskCache перед добавлением
+                                                        try:
+                                                            with db_manager.get_db() as db:
+                                                                task_cache = db_manager._manager.get_task_cache(db, task_id)
+                                                                if task_cache and task_cache.status_id:
+                                                                    # Проверяем финальные статусы еще раз
+                                                                    if task_cache.status_id in final_status_ids:
+                                                                        logger.debug(f"Task {task_id} from BotLog FINAL CHECK: status_id {task_cache.status_id} from TaskCache is final - SKIPPING")
+                                                                        continue
+                                                                    # Также проверяем по названию статуса из кеша
+                                                                    if task_cache.status_name:
+                                                                        cache_status_name_lower = task_cache.status_name.lower().strip()
+                                                                        final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                                                        if any(keyword in cache_status_name_lower for keyword in final_keywords):
+                                                                            logger.debug(f"Task {task_id} from BotLog FINAL CHECK: status_name '{task_cache.status_name}' from TaskCache indicates final status - SKIPPING")
+                                                                            continue
+                                                        except Exception as final_cache_check_err:
+                                                            logger.debug(f"Error in final TaskCache check for task {task_id}: {final_cache_check_err}")
+                                                        
                                                         # Задача прошла все фильтры - добавляем
                                                         logger.info(f"✅ Added missing recent task {task_id} from BotLog to results")
                                                         filtered_tasks.append(task)
@@ -2366,6 +2385,40 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             if task_cache and task_cache.status_id:
                                 if task_cache.status_id in final_status_ids:
                                     logger.debug(f"Task {task_id} filtered out before display: status_id {task_cache.status_id} from TaskCache is final")
+                                    continue
+                                # Также проверяем по названию статуса из кеша
+                                if task_cache.status_name:
+                                    cache_status_name_lower = task_cache.status_name.lower().strip()
+                                    final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                    if any(keyword in cache_status_name_lower for keyword in final_keywords):
+                                        logger.debug(f"Task {task_id} filtered out before display: status_name '{task_cache.status_name}' from TaskCache indicates final status")
+                                        continue
+                            
+                            # Дополнительная проверка: проверяем статус из самой задачи (если TaskCache недоступен)
+                            task_status_obj = task.get('status', {}) or {}
+                            task_status_id_from_task = task_status_obj.get('id')
+                            task_status_name_from_task = task_status_obj.get('name', '')
+                            
+                            # Нормализуем status_id из задачи
+                            if isinstance(task_status_id_from_task, str) and ':' in str(task_status_id_from_task):
+                                try:
+                                    task_status_id_from_task = int(str(task_status_id_from_task).split(':')[-1])
+                                except Exception:
+                                    task_status_id_from_task = None
+                            elif not isinstance(task_status_id_from_task, int):
+                                task_status_id_from_task = None
+                            
+                            # Проверяем по ID статуса из задачи
+                            if task_status_id_from_task is not None and task_status_id_from_task in final_status_ids:
+                                logger.debug(f"Task {task_id} filtered out before display: status_id {task_status_id_from_task} from task data is final")
+                                continue
+                            
+                            # Проверяем по названию статуса из задачи
+                            if task_status_name_from_task:
+                                task_status_name_lower = task_status_name_from_task.lower().strip()
+                                final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                if any(keyword in task_status_name_lower for keyword in final_keywords):
+                                    logger.debug(f"Task {task_id} filtered out before display: status_name '{task_status_name_from_task}' from task data indicates final status")
                                     continue
                             
                             tasks_to_show.append(task)
