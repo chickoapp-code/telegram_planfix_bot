@@ -216,6 +216,40 @@ class BotLog(Base):
         return f"<BotLog(id={self.id}, action='{self.action}', success={self.success})>"
 
 
+class TaskCache(Base):
+    """
+    Кэш задач Planfix.
+    
+    Хранит актуальную информацию о задачах, обновляемую через вебхуки.
+    Это позволяет избежать множественных запросов к API Planfix.
+    """
+    __tablename__ = 'task_cache'
+
+    task_id = Column(Integer, primary_key=True, nullable=False, index=True)  # generalId задачи
+    task_id_internal = Column(Integer, nullable=True, index=True)  # Внутренний ID (если отличается от generalId)
+    name = Column(String(500), nullable=True)  # Название задачи
+    status_id = Column(Integer, nullable=True, index=True)  # ID статуса
+    status_name = Column(String(100), nullable=True)  # Название статуса
+    counterparty_id = Column(Integer, nullable=True, index=True)  # ID контрагента (ресторана)
+    project_id = Column(Integer, nullable=True, index=True)  # ID проекта
+    template_id = Column(Integer, nullable=True, index=True)  # ID шаблона
+    user_telegram_id = Column(Integer, nullable=True, index=True)  # ID пользователя, создавшего задачу
+    created_by_bot = Column(Boolean, default=True, nullable=False, index=True)  # Создана ли задача через бота
+    date_of_last_update = Column(DateTime, nullable=True)  # Дата последнего обновления
+    created_at = Column(DateTime, default=datetime.datetime.now, nullable=False)  # Дата создания записи в кэше
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now, nullable=False)  # Дата последнего обновления записи
+    
+    # Индексы для быстрого поиска
+    __table_args__ = (
+        Index('idx_task_user', 'user_telegram_id', 'created_by_bot'),
+        Index('idx_task_status', 'status_id', 'created_by_bot'),
+        Index('idx_task_counterparty', 'counterparty_id', 'created_by_bot'),
+    )
+
+    def __repr__(self):
+        return f"<TaskCache(task_id={self.task_id}, name='{self.name}', status='{self.status_name}')>"
+
+
 # ============================================================================
 # DATABASE INITIALIZATION
 # ============================================================================

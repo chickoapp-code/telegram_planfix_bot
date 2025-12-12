@@ -142,174 +142,129 @@ async def _check_comments_for_task(task_id: int, user_id: int, bot):
 async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = False):
     """Получает список заявок пользователя, только созданных через бота.
     
+    ОПТИМИЗАЦИЯ: Использует TaskCache вместо API запросов для ускорения работы.
+    
     Args:
         user_id: ID пользователя в Telegram
         limit: Максимальное количество заявок
         only_active: Если True, возвращает только активные заявки (не завершенные)
     """
+    # #region agent log
+    import time
+    perf_start = time.time()
+    log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+    import json as json_module
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"CACHE_GET_TASKS","location":"user_handlers.py:142","message":"get_user_tasks starting (using cache)","data":{"user_id":user_id,"limit":limit,"only_active":only_active},"timestamp":int(time.time()*1000)})+"\n")
+    except: pass
+    # #endregion
+    
     try:
         # Проверяем, что пользователь существует
         user = await db_manager.get_user_profile(user_id)
         if not user:
             return None
 
-        # Получаем task_id из BotLog для этого пользователя
-        logs = await db_manager.get_bot_logs_by_telegram_id(user_id, action='create_task')
+        # ОПТИМИЗАЦИЯ: Получаем задачи из TaskCache вместо API запросов
+        cached_tasks = await db_manager.run(
+            db_manager.get_user_tasks_from_cache,
+            user_id,
+            limit * 2  # Берем больше для фильтрации
+        )
         
-        logger.debug(f"Found {len(logs or [])} logs for user {user_id} with action 'create_task'")
-
-        # ОПТИМИЗАЦИЯ: Предзагружаем маппинг internal_id -> generalId один раз
-        import json as json_module
-        id_mapping = {}  # {internal_id: generalId, task_id: generalId}
-        bot_task_ids = []
+        logger.info(f"Found {len(cached_tasks)} tasks in cache for user {user_id}")
         
-        for log in logs or []:
-            try:
-                details = log.details or {}
-                if not details:
-                    logger.debug(f"Log {log.id} has no details")
-                    continue
-                
-                # Парсим details если это строка
-                if isinstance(details, str):
-                    try:
-                        details = json_module.loads(details)
-                    except:
-                        continue
-                
-                # ВАЖНО: Используем ТОЛЬКО task_id_general, так как API Planfix требует generalId
-                # Если task_id_general нет, пропускаем эту задачу (старые записи без generalId)
-                task_id_general = details.get('task_id_general')
-                if not task_id_general:
-                    # Пробуем получить из task_id, если он есть (для старых записей)
-                    task_id_val = details.get('task_id')
-                    if task_id_val:
-                        # Нормализуем ID
-                        if isinstance(task_id_val, str):
-                            if ':' in task_id_val:
-                                task_id_val = task_id_val.split(':')[-1]
-                            try:
-                                task_id_general = int(task_id_val)
-                            except (ValueError, TypeError):
-                                continue
-                        elif isinstance(task_id_val, (int, float)):
-                            task_id_general = int(task_id_val)
-                        else:
-                            continue
-                    else:
-                        continue  # Пропускаем задачи без generalId
-                
-                # Нормализуем generalId
-                if isinstance(task_id_general, str):
-                    if ':' in task_id_general:
-                        task_id_general = task_id_general.split(':')[-1]
-                    try:
-                        task_id_general = int(task_id_general)
-                    except (ValueError, TypeError):
-                        continue
-                elif isinstance(task_id_general, (int, float)):
-                    task_id_general = int(task_id_general)
-                else:
-                    continue
-                
-                bot_task_ids.append(task_id_general)
-                
-                # Сохраняем маппинг для internal_id и task_id (если они есть и отличаются)
-                task_id_internal = details.get('task_id_internal')
-                if task_id_internal:
-                    try:
-                        if isinstance(task_id_internal, str):
-                            if ':' in task_id_internal:
-                                task_id_internal = int(task_id_internal.split(':')[-1])
-                            else:
-                                task_id_internal = int(task_id_internal)
-                        elif isinstance(task_id_internal, (int, float)):
-                            task_id_internal = int(task_id_internal)
-                        else:
-                            task_id_internal = None
-                        
-                        if task_id_internal and task_id_internal != task_id_general:
-                            id_mapping[task_id_internal] = task_id_general
-                    except:
-                        pass
-                
-                task_id_old = details.get('task_id')
-                if task_id_old and task_id_old != task_id_general:
-                    try:
-                        if isinstance(task_id_old, str):
-                            if ':' in task_id_old:
-                                task_id_old = int(task_id_old.split(':')[-1])
-                            else:
-                                task_id_old = int(task_id_old)
-                        elif isinstance(task_id_old, (int, float)):
-                            task_id_old = int(task_id_old)
-                        else:
-                            task_id_old = None
-                        
-                        if task_id_old and task_id_old != task_id_general:
-                            id_mapping[task_id_old] = task_id_general
-                    except:
-                        pass
-                        
-            except Exception as e:
-                logger.warning(f"Error processing log {log.id if hasattr(log, 'id') else 'unknown'}: {e}")
-                continue
-
-        logger.info(f"Collected {len(bot_task_ids)} unique task IDs (generalId) for user {user_id}, mapping size: {len(id_mapping)}")
-        
-        if not bot_task_ids:
-            logger.info(f"No task IDs found for user {user_id} in BotLog")
+        if not cached_tasks:
+            logger.info(f"No tasks found in cache for user {user_id}")
             return []
 
-        # Сортируем по убыванию и применяем лимит
-        bot_task_ids = sorted(set(bot_task_ids), reverse=True)[:limit]
-        
-        # #region agent log
-        import time
-        perf_start = time.time()
-        log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
-        try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_GET_TASKS","location":"user_handlers.py:199","message":"get_user_tasks starting parallel fetch","data":{"user_id":user_id,"task_count":len(bot_task_ids),"mapping_size":len(id_mapping)},"timestamp":int(time.time()*1000)})+"\n")
-        except: pass
-        # #endregion
-
-        # Запрашиваем каждую задачу параллельно (быстрее, чем фильтр)
+        # Преобразуем TaskCache в формат, совместимый с API ответом
         tasks = []
-        import asyncio
+        for cached_task in cached_tasks:
+            task_dict = {
+                'id': cached_task.task_id,
+                'name': cached_task.name or 'Без названия',
+                'status': {
+                    'id': cached_task.status_id,
+                    'name': cached_task.status_name or 'Неизвестно'
+                },
+                'counterparty': {
+                    'id': cached_task.counterparty_id
+                } if cached_task.counterparty_id else {},
+                'dateOfLastUpdate': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None
+            }
+            tasks.append(task_dict)
         
-        async def fetch_task(tid):
+        # Фильтруем только активные заявки если требуется
+        if only_active:
             try:
-                tr = await planfix_client.get_task_by_id(tid, fields="id,name,status,dateOfLastUpdate,counterparty")
-                if tr and tr.get('result') == 'success' and tr.get('task'):
-                    return tr['task']
-            except Exception as e:
-                # Если получили 400 Bad Request, проверяем маппинг (быстро, без запроса к БД)
-                if "400" in str(e) or "Bad Request" in str(e):
-                    if tid in id_mapping:
-                        general_id = id_mapping[tid]
-                        logger.info(f"Found generalId {general_id} for task {tid} from mapping, retrying")
+                from planfix_client import planfix_client
+                final_status_ids = await planfix_client.get_terminal_status_ids(PLANFIX_TASK_PROCESS_ID)
+                terminal_status_names = {
+                    'завершенная', 'завершенное', 'завершена', 'завершено',
+                    'completed', 'done', 'finished',
+                    'отмененная', 'отмененное', 'отменена', 'отменено', 'отмена',
+                    'canceled', 'cancelled',
+                    'отклоненная', 'отклоненное', 'отклонена', 'отклонено',
+                    'rejected'
+                }
+                
+                def normalize_status_id(sid):
+                    if isinstance(sid, str) and ':' in sid:
                         try:
-                            tr = await planfix_client.get_task_by_id(general_id, fields="id,name,status,dateOfLastUpdate,counterparty")
-                            if tr and tr.get('result') == 'success' and tr.get('task'):
-                                return tr['task']
-                        except:
-                            pass
-                logger.debug(f"Failed to fetch task {tid}: {e}")
-            return None
+                            return int(sid.split(':')[1])
+                        except ValueError:
+                            return None
+                    try:
+                        return int(sid) if sid is not None else None
+                    except (TypeError, ValueError):
+                        return None
+                
+                active_tasks = []
+                for t in tasks:
+                    status_id = normalize_status_id(t.get('status', {}).get('id'))
+                    status_name = t.get('status', {}).get('name', 'Неизвестно')
+                    status_name_lower = status_name.lower().strip() if status_name else ''
+                    
+                    is_terminal = False
+                    if status_id is not None and status_id in final_status_ids:
+                        is_terminal = True
+                    elif status_name_lower in terminal_status_names:
+                        is_terminal = True
+                    else:
+                        for terminal_keyword in ['отмен', 'завершен', 'cancel', 'completed', 'finished', 'rejected', 'отклонен']:
+                            if terminal_keyword in status_name_lower:
+                                is_terminal = True
+                                break
+                    
+                    if not is_terminal:
+                        active_tasks.append(t)
+                
+                tasks = active_tasks
+                logger.info(f"Filtered active tasks: {len(active_tasks)} active out of {len(cached_tasks)} total")
+            except Exception as e:
+                logger.error(f"Error filtering active tasks: {e}", exc_info=True)
         
-        # Запрашиваем все задачи параллельно
-        # ОПТИМИЗАЦИЯ: Используем return_exceptions=True, чтобы не останавливаться на ошибках отдельных задач
-        task_results = await asyncio.gather(*[fetch_task(tid) for tid in bot_task_ids], return_exceptions=True)
-        tasks = [t for t in task_results if t is not None and not isinstance(t, Exception)]
+        # Сортируем по dateOfLastUpdate (новые сверху)
+        def get_sort_key(task):
+            date_val = task.get('dateOfLastUpdate', '')
+            if isinstance(date_val, dict):
+                return date_val.get('value', '') or date_val.get('timestamp', '') or ''
+            return date_val or ''
+        
+        tasks.sort(key=get_sort_key, reverse=True)
+        tasks = tasks[:limit]  # Применяем лимит после сортировки
         
         # #region agent log
         perf_duration = (time.time() - perf_start) * 1000
         try:
             with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_GET_TASKS","location":"user_handlers.py:238","message":"get_user_tasks parallel fetch completed","data":{"user_id":user_id,"task_count":len(bot_task_ids),"successful":len(tasks),"duration_ms":perf_duration},"timestamp":int(time.time()*1000)})+"\n")
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"CACHE_GET_TASKS","location":"user_handlers.py:274","message":"get_user_tasks completed (using cache)","data":{"user_id":user_id,"task_count":len(tasks),"duration_ms":perf_duration},"timestamp":int(time.time()*1000)})+"\n")
         except: pass
         # #endregion
+        
+        return tasks
         
         # Обновляем статусы в tracked_tasks для ускорения синхронизации
         # (статусы уже актуальные, так как получаем их напрямую из Planfix)
@@ -1671,6 +1626,142 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                         action="create_task",
                         details=bot_log_details,
                     )
+                    
+                    # ОПТИМИЗАЦИЯ: Сохраняем задачу в TaskCache для быстрого доступа
+                    try:
+                        # Получаем информацию о статусе из созданной задачи
+                        task_info_for_cache = await planfix_client.get_task_by_id(
+                            task_id_general,
+                            fields="id,name,status,project,counterparty,template"
+                        )
+                        if task_info_for_cache and task_info_for_cache.get('result') == 'success':
+                            task_obj_cache = task_info_for_cache.get('task', {})
+                            status_obj_cache = task_obj_cache.get('status', {})
+                            status_id_cache = None
+                            status_name_cache = None
+                            if isinstance(status_obj_cache, dict):
+                                # Нормализуем status_id
+                                status_id_raw = status_obj_cache.get('id')
+                                if status_id_raw:
+                                    if isinstance(status_id_raw, str) and ':' in status_id_raw:
+                                        status_id_raw = status_id_raw.split(':')[-1]
+                                    try:
+                                        status_id_cache = int(status_id_raw) if str(status_id_raw).isdigit() else None
+                                    except:
+                                        pass
+                                status_name_cache = status_obj_cache.get('name')
+                            
+                            counterparty_id_cache = None
+                            counterparty_cache = task_obj_cache.get('counterparty', {})
+                            if isinstance(counterparty_cache, dict):
+                                counterparty_id_cache = counterparty_cache.get('id')
+                                if isinstance(counterparty_id_cache, str) and ':' in counterparty_id_cache:
+                                    counterparty_id_cache = int(counterparty_id_cache.split(':')[-1])
+                                elif isinstance(counterparty_id_cache, (int, str)) and str(counterparty_id_cache).isdigit():
+                                    counterparty_id_cache = int(counterparty_id_cache)
+                            
+                            project_id_cache = None
+                            project_cache = task_obj_cache.get('project', {})
+                            if isinstance(project_cache, dict):
+                                project_id_cache = project_cache.get('id')
+                                if isinstance(project_id_cache, str) and ':' in project_id_cache:
+                                    project_id_cache = int(project_id_cache.split(':')[-1])
+                                elif isinstance(project_id_cache, (int, str)) and str(project_id_cache).isdigit():
+                                    project_id_cache = int(project_id_cache)
+                            
+                            template_id_cache = None
+                            template_cache = task_obj_cache.get('template', {})
+                            if isinstance(template_cache, dict):
+                                template_id_cache = template_cache.get('id')
+                                if isinstance(template_id_cache, (int, str)) and str(template_id_cache).isdigit():
+                                    template_id_cache = int(template_id_cache)
+                            
+                            await db_manager.run(
+                                db_manager.create_or_update_task_cache,
+                                task_id=task_id_general,
+                                task_id_internal=task_id_internal,
+                                name=task_obj_cache.get('name', ''),
+                                status_id=status_id_cache,
+                                status_name=status_name_cache,
+                                counterparty_id=counterparty_id_cache,
+                                project_id=project_id_cache,
+                                template_id=template_id_cache,
+                                user_telegram_id=user_id,
+                                created_by_bot=True,
+                                date_of_last_update=datetime.now()
+                            )
+                            logger.debug(f"✅ Saved task {task_id_general} to TaskCache")
+                    except Exception as cache_err:
+                        logger.warning(f"Failed to save task {task_id_general} to TaskCache: {cache_err}")
+                    
+                    # ОПТИМИЗАЦИЯ: Сохраняем задачу в TaskCache для быстрого доступа
+                    try:
+                        # Получаем информацию о статусе из созданной задачи
+                        task_info_for_cache = await planfix_client.get_task_by_id(
+                            task_id_general,
+                            fields="id,name,status,project,counterparty,template"
+                        )
+                        if task_info_for_cache and task_info_for_cache.get('result') == 'success':
+                            task_obj_cache = task_info_for_cache.get('task', {})
+                            status_obj_cache = task_obj_cache.get('status', {})
+                            status_id_cache = None
+                            status_name_cache = None
+                            if isinstance(status_obj_cache, dict):
+                                # Нормализуем status_id
+                                status_id_raw = status_obj_cache.get('id')
+                                if status_id_raw:
+                                    if isinstance(status_id_raw, str) and ':' in status_id_raw:
+                                        status_id_raw = status_id_raw.split(':')[-1]
+                                    try:
+                                        status_id_cache = int(status_id_raw) if str(status_id_raw).isdigit() else None
+                                    except:
+                                        status_id_cache = None
+                                else:
+                                    status_id_cache = None
+                                status_name_cache = status_obj_cache.get('name')
+                            
+                            counterparty_id_cache = None
+                            counterparty_cache = task_obj_cache.get('counterparty', {})
+                            if isinstance(counterparty_cache, dict):
+                                counterparty_id_cache = counterparty_cache.get('id')
+                                if isinstance(counterparty_id_cache, str) and ':' in counterparty_id_cache:
+                                    counterparty_id_cache = int(counterparty_id_cache.split(':')[-1])
+                                elif isinstance(counterparty_id_cache, (int, str)) and str(counterparty_id_cache).isdigit():
+                                    counterparty_id_cache = int(counterparty_id_cache)
+                            
+                            project_id_cache = None
+                            project_cache = task_obj_cache.get('project', {})
+                            if isinstance(project_cache, dict):
+                                project_id_cache = project_cache.get('id')
+                                if isinstance(project_id_cache, str) and ':' in project_id_cache:
+                                    project_id_cache = int(project_id_cache.split(':')[-1])
+                                elif isinstance(project_id_cache, (int, str)) and str(project_id_cache).isdigit():
+                                    project_id_cache = int(project_id_cache)
+                            
+                            template_id_cache = None
+                            template_cache = task_obj_cache.get('template', {})
+                            if isinstance(template_cache, dict):
+                                template_id_cache = template_cache.get('id')
+                                if isinstance(template_id_cache, (int, str)) and str(template_id_cache).isdigit():
+                                    template_id_cache = int(template_id_cache)
+                            
+                            await db_manager.run(
+                                db_manager.create_or_update_task_cache,
+                                task_id=task_id_general,
+                                task_id_internal=task_id_internal,
+                                name=task_obj_cache.get('name', ''),
+                                status_id=status_id_cache,
+                                status_name=status_name_cache,
+                                counterparty_id=counterparty_id_cache,
+                                project_id=project_id_cache,
+                                template_id=template_id_cache,
+                                user_telegram_id=user_id,
+                                created_by_bot=True,
+                                date_of_last_update=datetime.now()
+                            )
+                            logger.debug(f"✅ Saved task {task_id_general} to TaskCache")
+                    except Exception as cache_err:
+                        logger.warning(f"Failed to save task {task_id_general} to TaskCache: {cache_err}")
                 except Exception as log_err:
                     logger.warning(f"Failed to write BotLog for task {task_id}: {log_err}")
                 

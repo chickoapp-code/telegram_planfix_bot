@@ -289,22 +289,81 @@ class PlanfixWebhookHandler:
             
             logger.info(f"📋 New task created: {task_id} in project {project_id}" + 
                        (f", counterparty: {counterparty_id}" if counterparty_id else ""))
-            await self.notification_service.notify_new_task(task_id, project_id)
             
-            # Сохраняем начальный статус в кэш
-            # Согласно swagger.json, статус должен быть объектом {"id": 4, "name": "В работе"}
+            # Сохраняем задачу в кэш БД
             status_obj = task.get('status', {})
             if isinstance(status_obj, dict):
                 status_id_raw = (
-                    status_obj.get('id') or  # Стандартный формат (приоритет)
+                    status_obj.get('id') or
                     status_obj.get('task.status.id') or 
                     status_obj.get('task.status.Идентификатор')
                 )
+                status_name = status_obj.get('name') or status_obj.get('task.status.name')
             else:
                 status_id_raw = None
+                status_name = None
             status_id = self._normalize_status_id(status_id_raw)
+            
+            # Определяем, создана ли задача через бота (проверяем по BotLog)
+            created_by_bot = False
+            user_telegram_id = None
+            try:
+                with self.db_manager.get_db() as db:
+                    from database import BotLog
+                    import json as json_module
+                    # Ищем в BotLog задачу с этим task_id
+                    logs = db.query(BotLog).filter(
+                        BotLog.action == 'create_task'
+                    ).all()
+                    for log in logs:
+                        if log.details:
+                            details = log.details if isinstance(log.details, dict) else json_module.loads(log.details) if isinstance(log.details, str) else {}
+                            if details.get('task_id') == task_id or details.get('task_id_general') == task_id:
+                                created_by_bot = True
+                                user_telegram_id = log.telegram_id
+                                break
+                    
+                    # Сохраняем в TaskCache
+                    task_name = task.get('name', '')
+                    task_id_internal = None
+                    if task.get('id') and str(task.get('id')) != str(task_id):
+                        try:
+                            task_id_internal = int(task.get('id'))
+                        except:
+                            pass
+                    
+                    template_id = None
+                    template_obj = task.get('template', {})
+                    if isinstance(template_obj, dict):
+                        template_id_raw = template_obj.get('id')
+                        if template_id_raw:
+                            try:
+                                template_id = int(template_id_raw) if isinstance(template_id_raw, (int, str)) and str(template_id_raw).isdigit() else None
+                            except:
+                                pass
+                    
+                    self.db_manager.create_or_update_task_cache(
+                        db=db,
+                        task_id=task_id,
+                        task_id_internal=task_id_internal,
+                        name=task_name,
+                        status_id=status_id,
+                        status_name=status_name,
+                        counterparty_id=counterparty_id,
+                        project_id=project_id,
+                        template_id=template_id,
+                        user_telegram_id=user_telegram_id,
+                        created_by_bot=created_by_bot,
+                        date_of_last_update=datetime.now()
+                    )
+                    logger.debug(f"✅ Saved task {task_id} to TaskCache")
+            except Exception as cache_err:
+                logger.warning(f"Failed to save task {task_id} to TaskCache: {cache_err}")
+            
             if status_id:
                 self._task_status_cache[task_id] = status_id
+            
+            await self.notification_service.notify_new_task(task_id, project_id)
                 
         except Exception as e:
             logger.error(f"Error handling task created: {e}", exc_info=True)
@@ -584,6 +643,59 @@ class PlanfixWebhookHandler:
                         logger.warning(f"Registration task {task_id} status {new_status_id} ('{status_name}') is not recognized as a terminal status for executor approval")
                     else:
                         logger.warning(f"Could not determine status for registration task {task_id}, status data: {task.get('status', {})}")
+            
+            # Обновляем задачу в кэше БД
+            try:
+                with self.db_manager.get_db() as db:
+                    task_name = task.get('name', '')
+                    counterparty_id = None
+                    counterparty_raw = task.get('counterparty')
+                    if counterparty_raw:
+                        if isinstance(counterparty_raw, dict):
+                            counterparty_id = counterparty_raw.get('id')
+                        elif isinstance(counterparty_raw, str) and ':' in counterparty_raw:
+                            counterparty_id = int(counterparty_raw.split(':')[-1]) if counterparty_raw.split(':')[-1].isdigit() else None
+                        elif isinstance(counterparty_raw, (int, str)) and str(counterparty_raw).isdigit():
+                            counterparty_id = int(counterparty_raw)
+                    
+                    project_id = None
+                    project_raw = task.get('project', {})
+                    if isinstance(project_raw, dict):
+                        project_id_raw = project_raw.get('id')
+                        if project_id_raw:
+                            try:
+                                if isinstance(project_id_raw, str) and ':' in project_id_raw:
+                                    project_id = int(project_id_raw.split(':')[-1])
+                                elif isinstance(project_id_raw, (int, str)) and str(project_id_raw).isdigit():
+                                    project_id = int(project_id_raw)
+                            except:
+                                pass
+                    
+                    template_id = None
+                    template_obj = task.get('template', {})
+                    if isinstance(template_obj, dict):
+                        template_id_raw = template_obj.get('id')
+                        if template_id_raw:
+                            try:
+                                template_id = int(template_id_raw) if isinstance(template_id_raw, (int, str)) and str(template_id_raw).isdigit() else None
+                            except:
+                                pass
+                    
+                    # Обновляем TaskCache
+                    self.db_manager.create_or_update_task_cache(
+                        db=db,
+                        task_id=task_id,
+                        name=task_name if task_name else None,
+                        status_id=new_status_id,
+                        status_name=status_name_raw,
+                        counterparty_id=counterparty_id,
+                        project_id=project_id,
+                        template_id=template_id,
+                        date_of_last_update=datetime.now()
+                    )
+                    logger.debug(f"✅ Updated task {task_id} in TaskCache (status: {new_status_id})")
+            except Exception as cache_err:
+                logger.warning(f"Failed to update task {task_id} in TaskCache: {cache_err}")
             
             # Обрабатываем изменение статуса
             # #region agent log

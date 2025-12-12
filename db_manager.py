@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 import contextlib
-from database import SessionLocal, UserProfile, ExecutorProfile, PlanfixDirectory, PlanfixDirectoryEntry, PlanfixTaskStatus, PlanfixTaskTemplate, BotLog
+from database import SessionLocal, UserProfile, ExecutorProfile, PlanfixDirectory, PlanfixDirectoryEntry, PlanfixTaskStatus, PlanfixTaskTemplate, BotLog, TaskCache
 import datetime
 from typing import List, Dict, Optional
 
@@ -226,3 +226,70 @@ class DBManager:
         db.commit()
         db.refresh(log)
         return log
+
+    # --- TaskCache operations ---
+    def create_or_update_task_cache(self, db: Session, task_id: int, task_id_internal: Optional[int] = None,
+                                    name: Optional[str] = None, status_id: Optional[int] = None,
+                                    status_name: Optional[str] = None, counterparty_id: Optional[int] = None,
+                                    project_id: Optional[int] = None, template_id: Optional[int] = None,
+                                    user_telegram_id: Optional[int] = None, created_by_bot: bool = True,
+                                    date_of_last_update: Optional[datetime.datetime] = None) -> TaskCache:
+        """Создает или обновляет запись в кэше задач."""
+        task_cache = db.query(TaskCache).filter(TaskCache.task_id == task_id).first()
+        
+        if task_cache:
+            # Обновляем существующую запись
+            if task_id_internal is not None:
+                task_cache.task_id_internal = task_id_internal
+            if name is not None:
+                task_cache.name = name
+            if status_id is not None:
+                task_cache.status_id = status_id
+            if status_name is not None:
+                task_cache.status_name = status_name
+            if counterparty_id is not None:
+                task_cache.counterparty_id = counterparty_id
+            if project_id is not None:
+                task_cache.project_id = project_id
+            if template_id is not None:
+                task_cache.template_id = template_id
+            if user_telegram_id is not None:
+                task_cache.user_telegram_id = user_telegram_id
+            if date_of_last_update is not None:
+                task_cache.date_of_last_update = date_of_last_update
+            task_cache.updated_at = datetime.datetime.now()
+        else:
+            # Создаем новую запись
+            task_cache = TaskCache(
+                task_id=task_id,
+                task_id_internal=task_id_internal,
+                name=name,
+                status_id=status_id,
+                status_name=status_name,
+                counterparty_id=counterparty_id,
+                project_id=project_id,
+                template_id=template_id,
+                user_telegram_id=user_telegram_id,
+                created_by_bot=created_by_bot,
+                date_of_last_update=date_of_last_update
+            )
+            db.add(task_cache)
+        
+        db.commit()
+        db.refresh(task_cache)
+        return task_cache
+
+    def get_task_cache(self, db: Session, task_id: int) -> Optional[TaskCache]:
+        """Получает задачу из кэша по task_id (generalId)."""
+        return db.query(TaskCache).filter(TaskCache.task_id == task_id).first()
+
+    def get_user_tasks_from_cache(self, db: Session, user_telegram_id: int, limit: int = 50) -> List[TaskCache]:
+        """Получает задачи пользователя из кэша."""
+        return db.query(TaskCache).filter(
+            TaskCache.user_telegram_id == user_telegram_id,
+            TaskCache.created_by_bot == True
+        ).order_by(TaskCache.date_of_last_update.desc().nullslast(), TaskCache.created_at.desc()).limit(limit).all()
+
+    def get_task_cache_by_internal_id(self, db: Session, task_id_internal: int) -> Optional[TaskCache]:
+        """Получает задачу из кэша по internal ID."""
+        return db.query(TaskCache).filter(TaskCache.task_id_internal == task_id_internal).first()
