@@ -506,6 +506,32 @@ class TaskNotificationService:
                     
                     if update_response and update_response.get('result') == 'success':
                         logger.info(f"✅ Successfully assigned {len(assignee_contact_ids)} executor(s) to task {task_id} and set status to IN_PROGRESS")
+                        
+                        # Создаем записи о назначении в локальной БД, чтобы "📋 Мои задачи" показывал принятые заявки
+                        try:
+                            from database import TaskAssignment
+                            with self.db_manager.get_db() as db:
+                                for executor in matching_executors:
+                                    # Пропускаем, если уже есть активное назначение
+                                    existing = db.query(TaskAssignment).filter(
+                                        TaskAssignment.task_id == task_id,
+                                        TaskAssignment.executor_telegram_id == executor.telegram_id,
+                                        TaskAssignment.status == "active"
+                                    ).first()
+                                    if existing:
+                                        continue
+                                    
+                                    rec = TaskAssignment(
+                                        task_id=task_id,
+                                        executor_telegram_id=executor.telegram_id,
+                                        planfix_user_id=str(executor.planfix_user_id) if executor.planfix_user_id else None,
+                                        status="active"
+                                    )
+                                    db.add(rec)
+                                db.commit()
+                            logger.debug(f"✅ TaskAssignment records created for task {task_id} ({len(matching_executors)} executors)")
+                        except Exception as db_err:
+                            logger.warning(f"Failed to create TaskAssignment records for task {task_id}: {db_err}")
                     else:
                         logger.warning(f"Failed to assign executors to task {task_id}: {update_response}")
                 except Exception as assign_err:
