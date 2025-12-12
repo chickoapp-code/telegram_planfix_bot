@@ -823,6 +823,12 @@ class PlanfixAPIClient:
         except Exception:
             task_obj = {}
         
+        # ВАЖНО: Сохраняем существующих исполнителей ДО любых обновлений
+        existing_assignees = None
+        if task_obj and "assignees" in task_obj:
+            existing_assignees = task_obj.get("assignees")
+            logger.debug(f"Found existing assignees in task {task_id}: {existing_assignees}")
+        
         # Сохраняем существующие поля, которые не переопределяются
         if task_obj:
             # Сохраняем counterparty если он валиден и не переопределяется
@@ -903,12 +909,40 @@ class PlanfixAPIClient:
                 assignees_payload["groups"] = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups]
                 logger.debug(f"Setting assignees groups: {assignees_payload['groups']}")
             
+            # Объединяем новых исполнителей с существующими
+            if existing_assignees and existing_assignees.get("users"):
+                existing_users = existing_assignees.get("users", [])
+                # Получаем ID существующих пользователей/контактов
+                existing_ids = set()
+                for user_obj in existing_users:
+                    user_id_str = user_obj.get("id", "")
+                    if isinstance(user_id_str, str) and ":" in user_id_str:
+                        try:
+                            existing_ids.add(user_id_str)  # Сохраняем полный формат "user:123" или "contact:456"
+                        except Exception:
+                            pass
+                
+                # Добавляем существующих, которых нет в новых
+                for existing_user in existing_users:
+                    existing_id = existing_user.get("id", "")
+                    if existing_id and existing_id not in [f"user:{int(uid)}" for uid in (assignee_users or [])] + [f"contact:{int(cid)}" for cid in (assignee_contacts or [])]:
+                        users_list.append(existing_user)
+                        logger.debug(f"Preserving existing assignee: {existing_id}")
+            
+            if users_list:
+                assignees_payload["users"] = users_list
+                logger.debug(f"Setting assignees users (merged with existing): {assignees_payload['users']}")
+            
+            if assignee_groups:
+                assignees_payload["groups"] = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups]
+                logger.debug(f"Setting assignees groups: {assignees_payload['groups']}")
+            
             data["assignees"] = assignees_payload
-            logger.info(f"✅ Updated task {task_id} assignees: {assignees_payload}")
-        elif task_obj and "assignees" in task_obj:
+            logger.info(f"✅ Updated task {task_id} assignees (merged with existing): {assignees_payload}")
+        elif existing_assignees:
             # Сохраняем существующих исполнителей если новые не переданы
-            data["assignees"] = task_obj["assignees"]
-            logger.debug(f"Preserving existing assignees: {task_obj['assignees']}")
+            data["assignees"] = existing_assignees
+            logger.debug(f"Preserving existing assignees: {existing_assignees}")
         
         # ВАЖНО: Обновляем кастомные поля
         # Planfix требует, чтобы customFieldData был массивом объектов с полями field и value
