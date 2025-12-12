@@ -893,52 +893,39 @@ class PlanfixAPIClient:
             assignees_payload = {}
             users_list = []
             
-            # Добавляем пользователей
+            # Сначала добавляем новых исполнителей
             if assignee_users:
                 users_list.extend([{"id": f"user:{int(user_id)}"} for user_id in assignee_users])
             
-            # Добавляем контакты (в том же массиве users, но с префиксом contact:)
             if assignee_contacts:
                 users_list.extend([{"id": f"contact:{int(contact_id)}"} for contact_id in assignee_contacts])
-            
-            if users_list:
-                assignees_payload["users"] = users_list
-                logger.debug(f"Setting assignees users: {assignees_payload['users']}")
-            
-            if assignee_groups:
-                assignees_payload["groups"] = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups]
-                logger.debug(f"Setting assignees groups: {assignees_payload['groups']}")
             
             # Объединяем новых исполнителей с существующими
             if existing_assignees and existing_assignees.get("users"):
                 existing_users = existing_assignees.get("users", [])
-                # Получаем ID существующих пользователей/контактов
-                existing_ids = set()
-                for user_obj in existing_users:
-                    user_id_str = user_obj.get("id", "")
-                    if isinstance(user_id_str, str) and ":" in user_id_str:
-                        try:
-                            existing_ids.add(user_id_str)  # Сохраняем полный формат "user:123" или "contact:456"
-                        except Exception:
-                            pass
+                # Создаем множество ID новых исполнителей для быстрой проверки
+                new_ids = set()
+                if assignee_users:
+                    new_ids.update([f"user:{int(uid)}" for uid in assignee_users])
+                if assignee_contacts:
+                    new_ids.update([f"contact:{int(cid)}" for cid in assignee_contacts])
                 
                 # Добавляем существующих, которых нет в новых
                 for existing_user in existing_users:
                     existing_id = existing_user.get("id", "")
-                    if existing_id and existing_id not in [f"user:{int(uid)}" for uid in (assignee_users or [])] + [f"contact:{int(cid)}" for cid in (assignee_contacts or [])]:
+                    if existing_id and existing_id not in new_ids:
                         users_list.append(existing_user)
-                        logger.debug(f"Preserving existing assignee: {existing_id}")
             
+            # Устанавливаем users только если список не пустой
             if users_list:
                 assignees_payload["users"] = users_list
-                logger.debug(f"Setting assignees users (merged with existing): {assignees_payload['users']}")
             
             if assignee_groups:
                 assignees_payload["groups"] = [{"id": f"group:{int(group_id)}"} for group_id in assignee_groups]
-                logger.debug(f"Setting assignees groups: {assignees_payload['groups']}")
             
-            data["assignees"] = assignees_payload
-            logger.info(f"✅ Updated task {task_id} assignees (merged with existing): {assignees_payload}")
+            # ВАЖНО: Устанавливаем assignees только если есть хотя бы один исполнитель
+            if users_list or assignee_groups:
+                data["assignees"] = assignees_payload
         elif existing_assignees:
             # Сохраняем существующих исполнителей если новые не переданы
             data["assignees"] = existing_assignees

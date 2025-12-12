@@ -230,14 +230,16 @@ class TaskNotificationService:
             task = task_response.get('task', {})
             task_name = task.get('name', 'Без названия')
             
-            # ВАЖНО: Для обновления задачи нужен внутренний ID, а не generalId
-            # Извлекаем внутренний ID из ответа API
+            # ВАЖНО: Для обновления задачи нужен внутренний ID
+            # В Planfix API поле 'id' в ответе get_task_by_id - это внутренний ID
+            # generalId - это публичный номер задачи
             task_internal_id = None
-            task_general_id = None
-            task_id_from_response = task.get('id')
+            task_general_id = task.get('generalId') or task_id
             
+            # Извлекаем внутренний ID из ответа API
+            # Поле 'id' в ответе - это внутренний ID задачи
+            task_id_from_response = task.get('id')
             if task_id_from_response:
-                # ID может быть в формате "task:123" или просто числом
                 if isinstance(task_id_from_response, str) and ':' in task_id_from_response:
                     try:
                         task_internal_id = int(task_id_from_response.split(':')[-1])
@@ -246,10 +248,8 @@ class TaskNotificationService:
                 elif isinstance(task_id_from_response, (int, float)):
                     task_internal_id = int(task_id_from_response)
             
-            # Также получаем generalId если он есть
-            task_general_id = task.get('generalId') or task_id
-            
-            # Для обновления используем внутренний ID, если он есть, иначе используем переданный task_id
+            # Для обновления задачи используем внутренний ID
+            # Если внутренний ID не найден, используем переданный task_id (может быть generalId или internal)
             task_id_for_update = task_internal_id if task_internal_id else task_id
             
             logger.info(
@@ -493,12 +493,13 @@ class TaskNotificationService:
                                 planfix_contact_id = int(str(contact_id).split(':')[-1]) if isinstance(contact_id, str) and ':' in contact_id else int(contact_id)
                                 
                                 # Сохраняем contact_id в профиль исполнителя
-                                from services.db_service import db_manager
-                                await db_manager.update_executor_profile(
-                                    executor.telegram_id,
-                                    planfix_contact_id=str(planfix_contact_id),
-                                    planfix_user_id=str(planfix_contact_id)
-                                )
+                                with self.db_manager.get_db() as db:
+                                    self.db_manager.update_executor_profile(
+                                        db=db,
+                                        telegram_id=executor.telegram_id,
+                                        planfix_contact_id=str(planfix_contact_id),
+                                        planfix_user_id=str(planfix_contact_id)
+                                    )
                                 logger.info(f"Created and saved Planfix contact {planfix_contact_id} for executor {executor.telegram_id}")
                         else:
                             logger.warning(f"Failed to create Planfix contact for executor {executor.telegram_id}: {contact_response}")
