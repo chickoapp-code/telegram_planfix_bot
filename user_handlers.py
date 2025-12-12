@@ -1072,6 +1072,13 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
     
     finalize_create_task._in_progress[user_id] = True
     
+    # Отправляем промежуточное сообщение пользователю сразу
+    status_message = await message.answer(
+        "⏳ <b>Создаю заявку...</b>\n\n"
+        "Пожалуйста, подождите. Это займет несколько секунд.",
+        parse_mode="HTML"
+    )
+    
     # #region agent log
     import json, os, time
     log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
@@ -1098,7 +1105,14 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
         # #endregion
         
         if not user:
-            await message.answer("❌ Профиль не найден. Пройдите регистрацию: /start")
+            try:
+                await status_message.edit_text(
+                    "❌ <b>Профиль не найден</b>\n\n"
+                    "Пройдите регистрацию: /start",
+                    parse_mode="HTML"
+                )
+            except:
+                await message.answer("❌ Профиль не найден. Пройдите регистрацию: /start")
             await state.clear()
             return
         
@@ -1106,7 +1120,14 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
             # Получаем информацию о шаблоне
             template_info = get_template_info(template_id)
             if not template_info:
-                await message.answer("❌ Шаблон не найден. Попробуйте снова.")
+                try:
+                    await status_message.edit_text(
+                        "❌ <b>Шаблон не найден</b>\n\n"
+                        "Попробуйте снова.",
+                        parse_mode="HTML"
+                    )
+                except:
+                    await message.answer("❌ Шаблон не найден. Попробуйте снова.")
                 await state.clear()
                 return
             
@@ -1765,29 +1786,62 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 except Exception as log_err:
                     logger.warning(f"Failed to write BotLog for task {task_id}: {log_err}")
                 
-                await message.answer(
-                    f"✅ <b>Заявка успешно создана!</b>\n\n"
-                    f"📋 <b>Номер заявки:</b> #{task_id}\n"
-                    f"📝 <b>Тип:</b> {template_info.get('name', 'Заявка')}\n"
-                    f"📊 <b>Статус:</b> В работе\n\n"
-                    "Исполнители назначены автоматически и уже приступают к задаче.",
-                    reply_markup=get_main_menu_keyboard(),
-                    parse_mode="HTML"
-                )
+                # Обновляем промежуточное сообщение на финальное
+                try:
+                    await status_message.edit_text(
+                        f"✅ <b>Заявка успешно создана!</b>\n\n"
+                        f"📋 <b>Номер заявки:</b> #{task_id}\n"
+                        f"📝 <b>Тип:</b> {template_info.get('name', 'Заявка')}\n"
+                        f"📊 <b>Статус:</b> В работе\n\n"
+                        "Исполнители назначены автоматически и уже приступают к задаче.",
+                        reply_markup=get_main_menu_keyboard(),
+                        parse_mode="HTML"
+                    )
+                except Exception as edit_err:
+                    # Если не удалось отредактировать (например, сообщение слишком старое), отправляем новое
+                    logger.warning(f"Could not edit status message: {edit_err}, sending new message")
+                    await message.answer(
+                        f"✅ <b>Заявка успешно создана!</b>\n\n"
+                        f"📋 <b>Номер заявки:</b> #{task_id}\n"
+                        f"📝 <b>Тип:</b> {template_info.get('name', 'Заявка')}\n"
+                        f"📊 <b>Статус:</b> В работе\n\n"
+                        "Исполнители назначены автоматически и уже приступают к задаче.",
+                        reply_markup=get_main_menu_keyboard(),
+                        parse_mode="HTML"
+                    )
                 logger.info(f"Created task {task_id} for user {user_id}")
             else:
                 error_msg = create_response.get('error', 'Неизвестная ошибка') if create_response else 'Нет ответа от сервера'
                 logger.error(f"Failed to create task: {error_msg}")
-                await message.answer(
-                    f"❌ Не удалось создать заявку.\n\n"
-                    f"Ошибка: {error_msg}\n\n"
-                    "Попробуйте позже или обратитесь к администратору."
-                )
+                # Обновляем промежуточное сообщение на сообщение об ошибке
+                try:
+                    await status_message.edit_text(
+                        f"❌ <b>Не удалось создать заявку</b>\n\n"
+                        f"Ошибка: {error_msg}\n\n"
+                        "Попробуйте позже или обратитесь к администратору.",
+                        parse_mode="HTML"
+                    )
+                except Exception as edit_err:
+                    logger.warning(f"Could not edit status message: {edit_err}, sending new message")
+                    await message.answer(
+                        f"❌ Не удалось создать заявку.\n\n"
+                        f"Ошибка: {error_msg}\n\n"
+                        "Попробуйте позже или обратитесь к администратору."
+                    )
         except Exception as e:
             logger.error(f"Error creating task: {e}", exc_info=True)
-            await message.answer(
-                "❌ Произошла ошибка при создании заявки. Попробуйте позже."
-            )
+            # Обновляем промежуточное сообщение на сообщение об ошибке
+            try:
+                await status_message.edit_text(
+                    "❌ <b>Произошла ошибка при создании заявки</b>\n\n"
+                    "Попробуйте позже или обратитесь к администратору.",
+                    parse_mode="HTML"
+                )
+            except Exception as edit_err:
+                logger.warning(f"Could not edit status message: {edit_err}, sending new message")
+                await message.answer(
+                    "❌ Произошла ошибка при создании заявки. Попробуйте позже."
+                )
     finally:
         # Снимаем флаг создания задачи
         if hasattr(finalize_create_task, '_in_progress'):

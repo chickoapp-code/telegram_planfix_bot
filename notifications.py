@@ -426,14 +426,62 @@ class NotificationService:
 
             notified_any = False
 
-            # 1) Клиент (по restaurant_contact_id) + фолбэк по телефону из customFieldData
+            # 1) Клиент: сначала по контакту из кастомного поля CUSTOM_FIELD_CONTACT_ID, затем по restaurant_contact_id, затем фолбэки
             if send_to_user:
                 user_notified = False
-                if counterparty_num:
+                
+                # ПРИОРИТЕТ 1: Ищем заявителя по контакту из кастомного поля CUSTOM_FIELD_CONTACT_ID
+                try:
+                    from config import CUSTOM_FIELD_CONTACT_ID
+                    custom_fields = task.get('customFieldData', []) or []
+                    user_contact_id = None
+                    
+                    for cf in custom_fields:
+                        field_id = cf.get('field', {}).get('id')
+                        if field_id == CUSTOM_FIELD_CONTACT_ID:
+                            contact_value = cf.get('value')
+                            if isinstance(contact_value, dict):
+                                contact_id_raw = contact_value.get('id')
+                                if contact_id_raw:
+                                    if isinstance(contact_id_raw, str) and ':' in contact_id_raw:
+                                        try:
+                                            user_contact_id = int(contact_id_raw.split(':')[-1])
+                                        except Exception:
+                                            pass
+                                    else:
+                                        try:
+                                            user_contact_id = int(contact_id_raw)
+                                        except Exception:
+                                            pass
+                                    if user_contact_id:
+                                        break
+                    
+                    if user_contact_id:
+                        logger.debug(f"Found user contact {user_contact_id} from custom field CUSTOM_FIELD_CONTACT_ID for task {task_id}")
+                        with self.db_manager.get_db() as db:
+                            # Ищем пользователя по planfix_contact_id
+                            user = db.query(UserProfile).filter(
+                                UserProfile.planfix_contact_id == str(user_contact_id)
+                            ).first()
+                            # Исключаем админов из уведомлений о комментариях
+                            if user and user.telegram_id not in TELEGRAM_ADMIN_IDS:
+                                await self._send_notification(user.telegram_id, message, media_files=media_files)
+                                notified_any = True
+                                user_notified = True
+                                logger.info(f"✅ Notified user {user.telegram_id} about comment in task {task_id} (found by planfix_contact_id={user_contact_id})")
+                            elif user:
+                                logger.debug(f"User {user.telegram_id} is admin, skipping notification for task {task_id}")
+                            else:
+                                logger.warning(f"No user found with planfix_contact_id={user_contact_id} for task {task_id}")
+                except Exception as e:
+                    logger.error(f"Error searching user by CUSTOM_FIELD_CONTACT_ID for task {task_id}: {e}", exc_info=True)
+                
+                # ПРИОРИТЕТ 2: Фолбэк - ищем по restaurant_contact_id (counterparty)
+                if not user_notified and counterparty_num:
                     try:
                         with self.db_manager.get_db() as db:
                             # Логируем поиск
-                            logger.debug(f"Searching for user with restaurant_contact_id={counterparty_num} for task {task_id}")
+                            logger.debug(f"Fallback: Searching for user with restaurant_contact_id={counterparty_num} for task {task_id}")
                             user = db.query(UserProfile).filter(
                                 UserProfile.restaurant_contact_id == counterparty_num
                             ).first()
@@ -442,14 +490,14 @@ class NotificationService:
                                 await self._send_notification(user.telegram_id, message, media_files=media_files)
                                 notified_any = True
                                 user_notified = True
-                                logger.info(f"Notified user {user.telegram_id} about comment in task {task_id}")
+                                logger.info(f"✅ Notified user {user.telegram_id} about comment in task {task_id} (found by restaurant_contact_id={counterparty_num})")
                             elif user:
                                 logger.debug(f"User {user.telegram_id} is admin, skipping notification for task {task_id}")
                             else:
                                 logger.warning(f"No user found with restaurant_contact_id={counterparty_num} for task {task_id}. Will try fallback methods.")
                     except Exception as e:
                         logger.error(f"Error notifying user for task {task_id}: {e}", exc_info=True)
-                else:
+                elif not user_notified:
                     logger.warning(f"counterparty_id is None or invalid for task {task_id}, cannot search by restaurant_contact_id")
                 
                 # Диагностика: логируем всех пользователей в БД для отладки
