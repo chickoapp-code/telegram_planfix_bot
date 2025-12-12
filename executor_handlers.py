@@ -2195,7 +2195,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         
                                                         # Проверяем, не является ли задача завершенной
                                                         try:
-                                                            final_status_ids = collect_status_ids(
+                                                            final_status_ids = _collect_status_ids(
                                                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
                                                                 required=False
                                                             )
@@ -2397,42 +2397,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
 # ПРОСМОТР МОИХ ЗАДАЧ
 # ============================================================================
 
-# Убрали обработчик "📋 Мои задачи" - функция не нужна
-# Убрали обработчик "📋 Мои задачи" - функция не нужна
-# @router.message(F.text == "📋 Мои задачи")
-# async def show_my_tasks(message: Message, state: FSMContext):
-#     """Показать задачи, назначенные на исполнителя."""
-#     logger.info(f"Handler 'show_my_tasks' called for user {message.from_user.id}, text: '{message.text}'")
-    # Очищаем состояние FSM, чтобы кнопки меню работали всегда
-    await state.clear()
-    
-    executor = await db_manager.get_executor_profile(message.from_user.id)
-    
-    if not executor or executor.profile_status != "активен":
-        logger.warning(f"User {message.from_user.id} tried to access executor menu but is not an active executor")
-        await message.answer("❌ Вы не зарегистрированы как исполнитель.")
-        return
-    
-    if not executor.planfix_user_id:
-        await message.answer(
-            "⚠️ Ваш профиль не связан с учётной записью Planfix.\n\n"
-            "Обратитесь к администратору для настройки."
-        )
-        return
-    
-    try:
-        from database import TaskAssignment
-        # Получаем принятые задачи исполнителя из БД (только активные)
-        with db_manager.get_db() as dbs:
-            assignments = dbs.query(TaskAssignment).filter(
-                TaskAssignment.executor_telegram_id == executor.telegram_id,
-                TaskAssignment.status == "active"
-            ).all()
+# Убрали обработчик "📋 Мои задачи" - функция не нужна, так как объединена с "📋 Задачи"
+# (ранее эта функция показывала принятые задачи, теперь всё в "📋 Задачи")
 
-        # Если нет активных TaskAssignment, ищем задачи по assignees в Planfix
-        if not assignments:
-            logger.debug(f"No active TaskAssignment found for executor {executor.telegram_id}, trying to find tasks via assignees in Planfix")
-            try:
+
+
                 # Получаем planfix_user_id исполнителя
                 planfix_user_id = executor.planfix_user_id or executor.planfix_contact_id
                 if not planfix_user_id:
