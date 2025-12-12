@@ -1677,22 +1677,18 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             result_order=[{"field": "dateTime", "direction": "Desc"}]
                         )
                     else:
-                        # Для последующих страниц используем кэш
-                        cached_api_response = cache.get(api_cache_key)
-                        if cached_api_response:
-                            logger.debug(f"Using cached API response for {api_cache_key}")
-                            tasks_response = cached_api_response
-                        else:
-                            tasks_response = await planfix_client.get_task_list(
-                                filters=filters,
-                                fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
-                                page_size=page_size,
-                                offset=offset,
-                                result_order=[{"field": "dateTime", "direction": "Desc"}]
-                            )
-                            # Кэшируем результат API запроса на 30 секунд
-                            if tasks_response and tasks_response.get('result') == 'success':
-                                cache.set(api_cache_key, tasks_response, ttl_seconds=30)
+                    # ВАЖНО: Не используем кэш для API запросов, чтобы всегда получать актуальные статусы задач
+                    # Это гарантирует, что завершенные задачи не будут показываться в списке
+                    # Кэш может содержать устаревшие данные о статусах задач
+                    logger.debug(f"Fetching fresh task list from API (not using cache) to ensure accurate task statuses (status_id={status_id}, offset={offset})")
+                    tasks_response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
+                        page_size=page_size,
+                        offset=offset,
+                        result_order=[{"field": "dateTime", "direction": "Desc"}]
+                    )
+                    # НЕ кэшируем результат API запроса, чтобы всегда получать актуальные статусы
 
                     # Детальное логирование ответа для диагностики
                     if tasks_response:
@@ -1758,6 +1754,40 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         elif working_status_ids:
                             if task_status_id not in working_status_ids:
                                 continue
+                        
+                        # ВАЖНО: Исключаем завершенные, отмененные и отклоненные задачи
+                        # Даже если они попали в запрос, не показываем их
+                        try:
+                            final_status_ids = collect_status_ids(
+                                (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
+                                required=False
+                            )
+                            if not final_status_ids:
+                                # Если не получили через collect_status_ids, пробуем через require_status_id
+                                final_status_ids = set()
+                                for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
+                                    try:
+                                        sid = require_status_id(status_key)
+                                        if sid:
+                                            final_status_ids.add(sid)
+                                    except Exception:
+                                        pass
+                            
+                            # Проверяем по ID статуса
+                            if task_status_id is not None and task_status_id in final_status_ids:
+                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} is final (COMPLETED/FINISHED/CANCELLED/REJECTED)")
+                                continue
+                            
+                            # Проверяем по названию статуса (дополнительная проверка)
+                            if task_status_name:
+                                status_name_lower = task_status_name.lower().strip()
+                                final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                if any(keyword in status_name_lower for keyword in final_keywords):
+                                    logger.debug(f"Task {task_id} filtered out: status_name '{task_status_name}' indicates final status")
+                                    continue
+                        except Exception as final_filter_err:
+                            logger.warning(f"Error checking final status for task {task_id}: {final_filter_err}")
+                            # Продолжаем, если не удалось проверить
                         
                         # Дополнительная фильтрация по дате (последние 7 дней)
                         task_date = _parse_planfix_datetime(task.get('dateTime'))
@@ -2037,6 +2067,55 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                             except Exception as e2:
                                                 logger.warning(f"Failed to fetch task {log_task_id} by internal ID {internal_id}: {e2}")
                                     
+                                    # Проверяем, что задача не завершена, перед добавлением
+                                    if task_response and task_response.get('result') == 'success':
+                                        task_from_log = task_response.get('task', {})
+                                        task_status_from_log = task_from_log.get('status', {}) or {}
+                                        task_status_id_from_log = task_status_from_log.get('id')
+                                        task_status_name_from_log = task_status_from_log.get('name', '')
+                                        
+                                        # Нормализуем status_id
+                                        if isinstance(task_status_id_from_log, str) and ':' in str(task_status_id_from_log):
+                                            try:
+                                                task_status_id_from_log = int(str(task_status_id_from_log).split(':')[-1])
+                                            except Exception:
+                                                task_status_id_from_log = None
+                                        elif isinstance(task_status_id_from_log, int):
+                                            pass  # Уже число
+                                        else:
+                                            task_status_id_from_log = None
+                                        
+                                        # Проверяем, не является ли задача завершенной
+                                        try:
+                                            final_status_ids = collect_status_ids(
+                                                (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
+                                                required=False
+                                            )
+                                            if not final_status_ids:
+                                                final_status_ids = set()
+                                                for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
+                                                    try:
+                                                        sid = require_status_id(status_key)
+                                                        if sid:
+                                                            final_status_ids.add(sid)
+                                                    except Exception:
+                                                        pass
+                                            
+                                            # Проверяем по ID статуса
+                                            if task_status_id_from_log is not None and task_status_id_from_log in final_status_ids:
+                                                logger.debug(f"Task {log_task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
+                                                continue
+                                            
+                                            # Проверяем по названию статуса
+                                            if task_status_name_from_log:
+                                                status_name_lower = task_status_name_from_log.lower().strip()
+                                                final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                                if any(keyword in status_name_lower for keyword in final_keywords):
+                                                    logger.debug(f"Task {log_task_id} from BotLog filtered out: status_name '{task_status_name_from_log}' indicates final status")
+                                                    continue
+                                        except Exception as final_filter_err:
+                                            logger.warning(f"Error checking final status for task {log_task_id} from BotLog: {final_filter_err}")
+                                    
                                     if not task_response:
                                         logger.warning(f"Could not fetch task {log_task_id} from API")
                                         continue
@@ -2073,6 +2152,53 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         if allowed_restaurant_ids and counterparty_id not in allowed_restaurant_ids:
                                                             logger.debug(f"Task {task_id} from BotLog filtered out by restaurant: {counterparty_id} not in allowed")
                                                             continue
+                                                        
+                                                        # Проверяем статус задачи - исключаем завершенные
+                                                        task_status_obj = task.get('status', {}) or {}
+                                                        task_status_id_from_log = task_status_obj.get('id')
+                                                        task_status_name_from_log = task_status_obj.get('name', '')
+                                                        
+                                                        # Нормализуем status_id
+                                                        if isinstance(task_status_id_from_log, str) and ':' in str(task_status_id_from_log):
+                                                            try:
+                                                                task_status_id_from_log = int(str(task_status_id_from_log).split(':')[-1])
+                                                            except Exception:
+                                                                task_status_id_from_log = None
+                                                        elif isinstance(task_status_id_from_log, int):
+                                                            pass  # Уже число
+                                                        else:
+                                                            task_status_id_from_log = None
+                                                        
+                                                        # Проверяем, не является ли задача завершенной
+                                                        try:
+                                                            final_status_ids = collect_status_ids(
+                                                                (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
+                                                                required=False
+                                                            )
+                                                            if not final_status_ids:
+                                                                final_status_ids = set()
+                                                                for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
+                                                                    try:
+                                                                        sid = require_status_id(status_key)
+                                                                        if sid:
+                                                                            final_status_ids.add(sid)
+                                                                    except Exception:
+                                                                        pass
+                                                            
+                                                            # Проверяем по ID статуса
+                                                            if task_status_id_from_log is not None and task_status_id_from_log in final_status_ids:
+                                                                logger.debug(f"Task {task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
+                                                                continue
+                                                            
+                                                            # Проверяем по названию статуса
+                                                            if task_status_name_from_log:
+                                                                status_name_lower = task_status_name_from_log.lower().strip()
+                                                                final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
+                                                                if any(keyword in status_name_lower for keyword in final_keywords):
+                                                                    logger.debug(f"Task {task_id} from BotLog filtered out: status_name '{task_status_name_from_log}' indicates final status")
+                                                                    continue
+                                                        except Exception as final_filter_err:
+                                                            logger.warning(f"Error checking final status for task {task_id} from BotLog: {final_filter_err}")
                                                         
                                                         # Проверяем теги
                                                         task_tag_names = _extract_task_tags(task)
@@ -3532,6 +3658,32 @@ async def _finalize_executor_comment(message_or_callback, state: FSMContext, ski
                     description=full_comment,
                     files=files
                 )
+                
+                    # Очищаем кэш для всех исполнителей после завершения задачи
+                    # Это гарантирует, что завершенная задача не будет показываться в списке "Новые заявки"
+                    try:
+                        # Получаем всех активных исполнителей
+                        with db_manager.get_db() as db:
+                            from database import ExecutorProfile
+                            executors = db.query(ExecutorProfile).filter(
+                                ExecutorProfile.profile_status == "активен"
+                            ).all()
+                        
+                        # Очищаем кэш для каждого исполнителя
+                        for exec in executors:
+                            # Очищаем кэш списка задач
+                            cache.delete(f"new_tasks:{exec.telegram_id}")
+                            cache.delete(f"new_tasks_request:{exec.telegram_id}:result")
+                            cache.delete(f"new_tasks_request:{exec.telegram_id}:time")
+                        
+                        # Очищаем кэш API запросов для всех статусов (они могут содержать эту задачу)
+                        cache.clear_pattern("api_tasks:")
+                        
+                        logger.info(f"✅ Cleared cache for all executors after task {task_id} completion")
+                    except Exception as cache_clear_err:
+                        logger.warning(f"Error clearing cache after task completion: {cache_clear_err}")
+                        # Не прерываем выполнение из-за ошибки очистки кэша
+                
             except Exception as e:
                 logger.error(f"Error adding comment to task {task_id} (close action): {e}", exc_info=True)
                 await answer_func("❌ Ошибка при добавлении комментария. Попробуйте позже.")
