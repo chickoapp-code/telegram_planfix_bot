@@ -1305,51 +1305,38 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 # #region agent log
                 try:
                     with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF3","location":"user_handlers.py:1274","message":"create_task completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF3","location":"user_handlers.py:1304","message":"create_task completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
                 except: pass
                 # #endregion
                 # create_task возвращает generalId в поле id
                 task_id_general = create_response.get('id') or create_response.get('task', {}).get('id')
                 logger.info(f"Task created successfully, generalId: {task_id_general}")
                 
-                # Пытаемся получить внутренний id задачи
-                task_id_internal = None
-                perf_step = time.time()
-                try:
-                    # Запрашиваем задачу по generalId, чтобы получить внутренний id
-                    task_info = await planfix_client.get_task_by_id(
-                        task_id_general,
-                        fields="id,generalId"
-                    )
-                    if task_info and task_info.get('result') == 'success':
-                        task_obj = task_info.get('task', {})
-                        # API может вернуть generalId в поле id, поэтому проверяем оба
-                        returned_id = task_obj.get('id')
-                        returned_general_id = task_obj.get('generalId')
-                        
-                        # Если id != generalId, значит id - это внутренний id
-                        if returned_id and returned_general_id and str(returned_id) != str(returned_general_id):
-                            task_id_internal = int(returned_id)
-                            logger.info(f"✅ Found internal task_id: {task_id_internal}, generalId: {returned_general_id}")
-                        else:
-                            # Если совпадают или generalId отсутствует, используем id как внутренний
-                            task_id_internal = int(returned_id) if returned_id else None
-                            logger.info(f"⚠️ Using returned id as internal: {task_id_internal}")
-                except Exception as id_err:
-                    logger.warning(f"Could not get internal task_id: {id_err}, will use generalId")
-                # #region agent log
-                try:
-                    with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF4","location":"user_handlers.py:1303","message":"get_task_by_id for internal_id completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
-                except: pass
-                # #endregion
+                # ОПТИМИЗАЦИЯ: Используем generalId напрямую, не делаем лишний запрос для internal_id
+                # Planfix API работает с generalId для большинства операций
+                task_id = task_id_general
+                task_id_internal = None  # Не используем internal_id, экономим 1-2 секунды
+                notification_task_id = task_id_general
+                logger.info(f"Using task_id: {task_id} (generalId, skipping internal_id lookup for performance)")
                 
-                # Используем internal id если есть, иначе generalId
-                task_id = task_id_internal if task_id_internal else task_id_general
+                # ОПТИМИЗАЦИЯ: Сначала пытаемся получить project_id из шаблона или franchise_group (без API вызова)
+                project_id = None
+                if template_id:
+                    try:
+                        template_info = get_template_info(template_id)
+                        if template_info and 'project_id' in template_info:
+                            project_id = template_info.get('project_id')
+                            if project_id:
+                                logger.info(f"✅ Found project_id {project_id} from template {template_id}")
+                    except Exception:
+                        pass
                 
-                # ВАЖНО: Для уведомлений используем generalId, так как API может не работать с внутренним ID
-                notification_task_id = task_id_general if task_id_general else task_id
-                logger.info(f"Using task_id: {task_id} (internal: {task_id_internal}, general: {task_id_general})")
+                if not project_id and user.franchise_group_id:
+                    from config import FRANCHISE_GROUPS
+                    if user.franchise_group_id in FRANCHISE_GROUPS:
+                        project_id = FRANCHISE_GROUPS[user.franchise_group_id].get('project_id')
+                        if project_id:
+                            logger.info(f"✅ Found project_id {project_id} from franchise_group {user.franchise_group_id}")
                 
                 # ОПТИМИЗАЦИЯ: Обновляем все остальные поля одним запросом (быстрее, чем множественные попытки)
                 # Формируем кастомные поля без обязательного поля 88 (мобильный телефон), которое уже установлено
@@ -1366,30 +1353,45 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 if files:
                     update_kwargs["files"] = files
                 
+                # ОПТИМИЗАЦИЯ: Параллельно обновляем задачу и получаем project_id из API (если не найден выше)
+                perf_step = time.time()
+                tasks_to_run = []
                 if update_kwargs:
-                    perf_step = time.time()
-                    try:
-                        await planfix_client.update_task(task_id, **update_kwargs)
+                    tasks_to_run.append(planfix_client.update_task(task_id, **update_kwargs))
+                if not project_id:
+                    tasks_to_run.append(planfix_client.get_task_by_id(
+                        task_id,
+                        fields="id,project.id,project.name"
+                    ))
+                
+                if tasks_to_run:
+                    results = await asyncio.gather(*tasks_to_run, return_exceptions=True)
+                    if update_kwargs and len(results) > 0 and not isinstance(results[0], Exception):
                         logger.info(f"✅ All remaining fields updated for task {task_id} (tags are in template, not added via API)")
                         # #region agent log
                         try:
                             with open(log_path, "a", encoding="utf-8") as f:
-                                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF5","location":"user_handlers.py:1328","message":"update_task for remaining fields completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF5","location":"user_handlers.py:1340","message":"update_task for remaining fields completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_step)*1000},"timestamp":int(time.time()*1000)})+"\n")
                         except: pass
                         # #endregion
-                    except Exception as update_error:
-                        logger.warning(f"Failed to update remaining fields for task {task_id}: {update_error}")
-                        # Пробуем обновить поля по отдельности (fallback)
-                        if remaining_custom_fields:
-                            try:
-                                await planfix_client.update_task(task_id, custom_field_data=remaining_custom_fields)
-                            except Exception as e:
-                                logger.error(f"Failed to update custom fields separately: {e}")
-                        if files:
-                            try:
-                                await planfix_client.update_task(task_id, files=files)
-                            except Exception as e:
-                                logger.error(f"Failed to update files separately: {e}")
+                    elif update_kwargs and len(results) > 0 and isinstance(results[0], Exception):
+                        logger.warning(f"Failed to update remaining fields for task {task_id}: {results[0]}")
+                    
+                    # Получаем project_id из результата API вызова
+                    if not project_id and len(tasks_to_run) > (1 if update_kwargs else 0):
+                        task_info_idx = 1 if update_kwargs else 0
+                        if len(results) > task_info_idx and not isinstance(results[task_info_idx], Exception):
+                            task_info = results[task_info_idx]
+                            if task_info and task_info.get('result') == 'success':
+                                task_obj = task_info.get('task', {})
+                                project = task_obj.get('project', {}) or {}
+                                project_id_raw = project.get('id')
+                                if project_id_raw:
+                                    if isinstance(project_id_raw, str) and ':' in project_id_raw:
+                                        project_id = int(project_id_raw.split(':')[-1])
+                                    else:
+                                        project_id = int(project_id_raw)
+                                    logger.info(f"✅ Found project_id {project_id} from task {task_id} project field")
                 
                 # ОПТИМИЗАЦИЯ: Убрана проверка задачи после создания (экономит 1-2 секунды)
                 # Если нужна проверка, можно включить опционально через флаг
@@ -1397,83 +1399,6 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 # Отправляем уведомление подходящим исполнителям о новой заявке
                 perf_step = time.time()
                 try:
-                    # Получаем project_id из созданной задачи (с полными полями)
-                    # Используем более полный список полей для получения project
-                    task_info = await planfix_client.get_task_by_id(
-                        task_id,
-                        fields="id,project.id,project.name,project.process.id,template.id,process.id"
-                    )
-                    project_id = None
-                    if task_info and task_info.get('result') == 'success':
-                        task_obj = task_info.get('task', {})
-                        project = task_obj.get('project', {}) or {}
-                        project_id_raw = project.get('id')
-                        if project_id_raw:
-                            if isinstance(project_id_raw, str) and ':' in project_id_raw:
-                                project_id = int(project_id_raw.split(':')[-1])
-                            else:
-                                project_id = int(project_id_raw)
-                            logger.info(f"✅ Found project_id {project_id} from task {task_id} project field")
-                    
-                    # Если project_id не найден, пытаемся получить из процесса задачи
-                    if not project_id:
-                        try:
-                            process = task_obj.get('process', {}) or {}
-                            process_id_raw = process.get('id')
-                            if process_id_raw:
-                                # Если есть process, можно попробовать получить project из процесса
-                                # Но обычно project устанавливается шаблоном, поэтому пробуем еще раз с задержкой
-                                logger.debug(f"Task {task_id} has process {process_id_raw}, but project_id not found yet")
-                        except Exception:
-                            pass
-                    
-                    # Если project_id не найден, пытаемся определить по шаблону
-                    if not project_id and template_id:
-                        try:
-                            template_info = get_template_info(template_id)
-                            if template_info and 'project_id' in template_info:
-                                project_id = template_info.get('project_id')
-                                if project_id:
-                                    logger.info(f"✅ Found project_id {project_id} from template {template_id}")
-                        except Exception:
-                            pass
-                    
-                    # Если project_id все еще не найден, пытаемся определить по franchise_group_id
-                    if not project_id and user.franchise_group_id:
-                        from config import FRANCHISE_GROUPS
-                        if user.franchise_group_id in FRANCHISE_GROUPS:
-                            project_id = FRANCHISE_GROUPS[user.franchise_group_id].get('project_id')
-                            if project_id:
-                                logger.info(f"✅ Found project_id {project_id} from franchise_group {user.franchise_group_id}")
-                    
-                    # Если project_id все еще не найден, используем project_id из созданной задачи (может быть установлен шаблоном)
-                    # Ждем немного, чтобы Planfix успел обработать задачу и установить project
-                    if not project_id:
-                        perf_sleep_start = time.time()
-                        try:
-                            await asyncio.sleep(1.0)  # Увеличиваем задержку до 1 секунды
-                            # #region agent log
-                            try:
-                                with open(log_path, "a", encoding="utf-8") as f:
-                                    f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF6","location":"user_handlers.py:1402","message":"sleep 1.0s completed","data":{"user_id":user_id,"duration_ms":(time.time()-perf_sleep_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
-                            except: pass
-                            # #endregion
-                            task_info_retry = await planfix_client.get_task_by_id(
-                                task_id,
-                                fields="id,project.id,project.name,project.process.id"
-                            )
-                            if task_info_retry and task_info_retry.get('result') == 'success':
-                                task_obj_retry = task_info_retry.get('task', {})
-                                project_retry = task_obj_retry.get('project', {}) or {}
-                                project_id_raw_retry = project_retry.get('id')
-                                if project_id_raw_retry:
-                                    if isinstance(project_id_raw_retry, str) and ':' in project_id_raw_retry:
-                                        project_id = int(project_id_raw_retry.split(':')[-1])
-                                    else:
-                                        project_id = int(project_id_raw_retry)
-                                    logger.info(f"✅ Found project_id {project_id} from task {task_id} on retry")
-                        except Exception as retry_err:
-                            logger.debug(f"Could not get project_id on retry for task {task_id}: {retry_err}")
                     
                     # Если project_id все еще не найден, используем альтернативный способ:
                     # Получаем полную информацию о задаче и извлекаем project из любого места

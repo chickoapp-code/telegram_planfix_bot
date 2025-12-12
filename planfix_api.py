@@ -939,13 +939,11 @@ class PlanfixAPIClient:
                 # #region agent log
                 try:
                     with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"planfix_api.py:928","message":"assignees payload before API call","data":{"assignees_payload":assignees_payload,"users_list":users_list},"timestamp":int(time.time()*1000)})+"\n")
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"planfix_api.py:944","message":"assignees payload before API call","data":{"assignees_payload":assignees_payload,"users_list":users_list},"timestamp":int(time.time()*1000)})+"\n")
                 except: pass
                 # #endregion
-        elif existing_assignees:
-            # Сохраняем существующих исполнителей если новые не переданы
-            data["assignees"] = existing_assignees
-            logger.debug(f"Preserving existing assignees: {existing_assignees}")
+        # ВАЖНО: Если новые исполнители не переданы, НЕ ТРОГАЕМ поле assignees вообще
+        # Это позволяет обновлять другие поля задачи (custom_field_data, files и т.д.) без изменения исполнителей
         
         # ВАЖНО: Обновляем кастомные поля
         # Planfix требует, чтобы customFieldData был массивом объектов с полями field и value
