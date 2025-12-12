@@ -168,7 +168,8 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
                     continue
                     
                 # Пробуем получить task_id из разных полей
-                task_id_val = details.get('task_id') or details.get('task_id_general') or details.get('task_id_internal')
+                # ВАЖНО: Используем task_id_general в приоритете, так как API Planfix требует generalId, а не internal ID
+                task_id_val = details.get('task_id_general') or details.get('task_id') or details.get('task_id_internal')
                 if task_id_val is not None:
                     # Нормализуем ID (может быть строкой вида "task:123" или числом)
                     if isinstance(task_id_val, str):
@@ -206,6 +207,30 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
                 if tr and tr.get('result') == 'success' and tr.get('task'):
                     return tr['task']
             except Exception as e:
+                # Если получили 400 Bad Request, возможно это internal ID, а не generalId
+                # Пробуем найти generalId в BotLog для этого ID
+                if "400" in str(e) or "Bad Request" in str(e):
+                    logger.warning(f"Got 400 Bad Request for task {tid}, trying to find generalId in BotLog")
+                    try:
+                        # Ищем в BotLog запись с task_id_internal = tid или task_id = tid
+                        with db_manager.get_db() as db:
+                            from database import BotLog
+                            import json as json_module
+                            logs = db.query(BotLog).filter(
+                                BotLog.action == 'create_task'
+                            ).all()
+                            for log in logs:
+                                if log.details:
+                                    details = log.details if isinstance(log.details, dict) else json_module.loads(log.details) if isinstance(log.details, str) else {}
+                                    if details.get('task_id_internal') == tid or details.get('task_id') == tid:
+                                        general_id = details.get('task_id_general') or details.get('task_id')
+                                        if general_id and general_id != tid:
+                                            logger.info(f"Found generalId {general_id} for task {tid}, retrying")
+                                            tr = await planfix_client.get_task_by_id(general_id, fields="id,name,status,dateOfLastUpdate,counterparty")
+                                            if tr and tr.get('result') == 'success' and tr.get('task'):
+                                                return tr['task']
+                    except Exception as retry_err:
+                        logger.debug(f"Failed to retry with generalId for task {tid}: {retry_err}")
                 logger.debug(f"Failed to fetch task {tid}: {e}")
             return None
         
@@ -1557,16 +1582,16 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                 # Сохраняем оба ID для совместимости с разными форматами
                 try:
                     bot_log_details = {
-                        "task_id": int(task_id),  # Основной ID (для совместимости)
+                        "task_id": int(task_id_general),  # Основной ID - всегда generalId
+                        "task_id_general": int(task_id_general),  # Всегда сохраняем generalId явно
                         "user_telegram_id": int(user_id),
                     }
-                    # Сохраняем оба ID если они разные
-                    if task_id_internal and task_id_general and task_id_internal != task_id_general:
+                    # Сохраняем internal ID если он есть и отличается от generalId
+                    if task_id_internal and task_id_internal != task_id_general:
                         bot_log_details["task_id_internal"] = int(task_id_internal)
-                        bot_log_details["task_id_general"] = int(task_id_general)
                         logger.info(f"✅ Saved both IDs in BotLog: internal={task_id_internal}, general={task_id_general}")
-                    elif task_id_general:
-                        bot_log_details["task_id_general"] = int(task_id_general)
+                    else:
+                        logger.info(f"✅ Saved task_id_general in BotLog: {task_id_general}")
                     
                     await db_manager.create_bot_log(
                         telegram_id=user_id,
@@ -2466,10 +2491,45 @@ async def handle_cancel_task_selection(callback_query: CallbackQuery, state: FSM
     
     try:
         # Проверяем существование задачи
-        task_response = await planfix_client.get_task_by_id(
-            task_id,
-            fields="id,name,status,counterparty"
-        )
+        task_response = None
+        try:
+            task_response = await planfix_client.get_task_by_id(
+                task_id,
+                fields="id,name,status,counterparty"
+            )
+        except Exception as e:
+            # Если получили 400 Bad Request, возможно это internal ID, а не generalId
+            # Пробуем найти generalId в BotLog для этого ID
+            if "400" in str(e) or "Bad Request" in str(e):
+                logger.warning(f"Got 400 Bad Request for task {task_id}, trying to find generalId in BotLog")
+                try:
+                    # Ищем в BotLog запись с task_id_internal = task_id или task_id = task_id
+                    with db_manager.get_db() as db:
+                        from database import BotLog
+                        import json as json_module
+                        logs = db.query(BotLog).filter(
+                            BotLog.action == 'create_task',
+                            BotLog.telegram_id == callback_query.from_user.id
+                        ).all()
+                        for log in logs:
+                            if log.details:
+                                details = log.details if isinstance(log.details, dict) else json_module.loads(log.details) if isinstance(log.details, str) else {}
+                                if details.get('task_id_internal') == task_id or details.get('task_id') == task_id:
+                                    general_id = details.get('task_id_general') or details.get('task_id')
+                                    if general_id and general_id != task_id:
+                                        logger.info(f"Found generalId {general_id} for task {task_id}, retrying")
+                                        task_response = await planfix_client.get_task_by_id(
+                                            general_id,
+                                            fields="id,name,status,counterparty"
+                                        )
+                                        if task_response and task_response.get('result') == 'success':
+                                            task_id = general_id  # Обновляем task_id на generalId для дальнейшего использования
+                                            break
+                except Exception as retry_err:
+                    logger.error(f"Failed to retry with generalId for task {task_id}: {retry_err}")
+            
+            if not task_response:
+                raise e  # Пробрасываем исходную ошибку, если не удалось найти generalId
         
         if not task_response or task_response.get('result') != 'success':
             await callback_query.message.edit_text(f"❌ Заявка #{task_id} не найдена.")
