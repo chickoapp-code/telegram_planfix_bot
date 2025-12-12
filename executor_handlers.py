@@ -1458,7 +1458,7 @@ async def callback_reject_executor(callback_query: CallbackQuery):
 # ПРОСМОТР НОВЫХ ЗАЯВОК
 # ============================================================================
 
-@router.message(F.text == "🆕 Новые заявки")
+@router.message(F.text == "📋 Задачи")
 async def show_new_tasks(message: Message, state: FSMContext):
     """Показать список новых заявок для исполнителя."""
     logger.info(f"Handler 'show_new_tasks' called for user {message.from_user.id}, text: '{message.text}'")
@@ -1720,22 +1720,50 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         if not task_id or task_id in seen_task_ids:
                             continue
 
+                        # Нормализуем task_id для использования в кеше
+                        try:
+                            if isinstance(task_id, str) and ':' in task_id:
+                                task_id_normalized = int(task_id.split(':')[-1])
+                            else:
+                                task_id_normalized = int(task_id)
+                        except (ValueError, TypeError):
+                            task_id_normalized = None
+                        
+                        # Пробуем получить статус из кеша (как у заявителя)
+                        task_status_id = None
+                        task_status_name = None
+                        if task_id_normalized:
+                            try:
+                                cached_task = await db_manager.run(
+                                    db_manager._manager.get_task_cache,
+                                    task_id_normalized
+                                )
+                                if cached_task:
+                                    task_status_id = cached_task.status_id
+                                    task_status_name = cached_task.status_name
+                                    logger.debug(f"✅ Got status from cache for task {task_id_normalized}: {task_status_id} ({task_status_name})")
+                            except Exception as cache_err:
+                                logger.debug(f"Could not get status from cache for task {task_id_normalized}: {cache_err}")
+                        
+                        # Если не получили из кеша, используем данные из API
+                        if task_status_id is None:
+                            task_status = task.get('status', {})
+                            task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
+                            task_status_name = task_status.get('name') if isinstance(task_status, dict) else None
+                            
+                            # Нормализуем status_id
+                            if isinstance(task_status_id, str) and ':' in str(task_status_id):
+                                try:
+                                    task_status_id = int(str(task_status_id).split(':')[-1])
+                                except Exception:
+                                    pass
+                            elif isinstance(task_status_id, int):
+                                pass  # Уже число
+                            else:
+                                task_status_id = None
+
                         template_id = _normalize_pf_id((task.get('template') or {}).get('id'))
                         counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
-                        task_status = task.get('status', {})
-                        task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
-                        task_status_name = task_status.get('name') if isinstance(task_status, dict) else None
-                        
-                        # Нормализуем status_id
-                        if isinstance(task_status_id, str) and ':' in str(task_status_id):
-                            try:
-                                task_status_id = int(str(task_status_id).split(':')[-1])
-                            except Exception:
-                                pass
-                        elif isinstance(task_status_id, int):
-                            pass  # Уже число
-                        else:
-                            task_status_id = None
 
                         # Фильтруем по статусу
                         if status_id is not None:
@@ -2363,8 +2391,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
 # ПРОСМОТР МОИХ ЗАДАЧ
 # ============================================================================
 
-@router.message(F.text == "📋 Мои задачи")
-async def show_my_tasks(message: Message, state: FSMContext):
+# Убрали обработчик "📋 Мои задачи" - функция не нужна
+# @router.message(F.text == "📋 Мои задачи")
+# async def show_my_tasks(message: Message, state: FSMContext):
     """Показать задачи, назначенные на исполнителя."""
     logger.info(f"Handler 'show_my_tasks' called for user {message.from_user.id}, text: '{message.text}'")
     # Очищаем состояние FSM, чтобы кнопки меню работали всегда
@@ -3158,12 +3187,25 @@ async def show_task_details(message: Message, state: FSMContext):
             # Собираем все файлы: из задачи + из комментариев
             all_files = []
             
+            # Используем set для отслеживания уже добавленных файлов по ID
+            seen_file_ids = set()
+            
             # Файлы из задачи
             for f in files[:10]:  # Максимум 10 файлов из задачи
                 fid_raw = f.get('id')
                 name = f.get('name') if isinstance(f, dict) else f"file_{fid_raw}"
                 if fid_raw:
-                    all_files.append((fid_raw, name, 'task'))
+                    # Нормализуем ID файла для сравнения
+                    try:
+                        fid_normalized = int(str(fid_raw).split(':')[-1])
+                        if fid_normalized not in seen_file_ids:
+                            seen_file_ids.add(fid_normalized)
+                            all_files.append((fid_raw, name, 'task'))
+                    except (ValueError, TypeError):
+                        # Если не удалось нормализовать, используем как есть
+                        if fid_raw not in seen_file_ids:
+                            seen_file_ids.add(fid_raw)
+                            all_files.append((fid_raw, name, 'task'))
             
             # Файлы из комментариев (только последние 5 комментариев)
             try:
@@ -3175,8 +3217,18 @@ async def show_task_details(message: Message, state: FSMContext):
                             break
                         fid_raw = f.get('id')
                         name = f.get('name') or f"file_{fid_raw}"
-                        if fid_raw and (fid_raw, name, 'comment') not in all_files:
-                            all_files.append((fid_raw, name, 'comment'))
+                        if fid_raw:
+                            # Нормализуем ID файла для сравнения
+                            try:
+                                fid_normalized = int(str(fid_raw).split(':')[-1])
+                                if fid_normalized not in seen_file_ids:
+                                    seen_file_ids.add(fid_normalized)
+                                    all_files.append((fid_raw, name, 'comment'))
+                            except (ValueError, TypeError):
+                                # Если не удалось нормализовать, используем как есть
+                                if fid_raw not in seen_file_ids:
+                                    seen_file_ids.add(fid_raw)
+                                    all_files.append((fid_raw, name, 'comment'))
                     if len(all_files) >= 15:
                         break
             except Exception as e:

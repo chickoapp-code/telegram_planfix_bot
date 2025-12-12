@@ -28,7 +28,7 @@ def get_main_menu_keyboard():
 def get_executor_main_menu_keyboard():
     """Главное меню для исполнителей."""
     buttons = [
-        [KeyboardButton(text="🆕 Новые заявки"), KeyboardButton(text="📋 Мои задачи")],
+        [KeyboardButton(text="📋 Задачи")],
         [KeyboardButton(text="👤 Профиль исполнителя")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -67,9 +67,7 @@ def get_task_actions_keyboard(task_id: int, is_new: bool = False, is_waiting: bo
     # Убрали кнопку "Принять в работу" - все исполнители назначаются автоматически
     # Для новых задач показываем только комментарии и завершение
     buttons.append([InlineKeyboardButton(text="💬 Написать комментарий", callback_data=f"comment:{task_id}")])
-    # Если задача в ожидании информации или на паузе — показываем «Возобновить»
-    if is_waiting or is_paused:
-        buttons.append([InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"resume:{task_id}")])
+    # Убрали кнопку "Возобновить" - не нужна
     buttons.append([InlineKeyboardButton(text="✅ Завершить", callback_data=f"close:{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
