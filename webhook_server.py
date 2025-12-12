@@ -681,7 +681,15 @@ class PlanfixWebhookHandler:
                             except:
                                 pass
                     
-                    # Обновляем TaskCache
+                    # Обновляем TaskCache, сохраняя существующие user_telegram_id и created_by_bot
+                    existing_cache = self.db_manager.get_task_cache(db, task_id)
+                    user_telegram_id = None
+                    created_by_bot = True
+                    if existing_cache:
+                        # Сохраняем существующие значения, если они есть
+                        user_telegram_id = existing_cache.user_telegram_id
+                        created_by_bot = existing_cache.created_by_bot
+                    
                     self.db_manager.create_or_update_task_cache(
                         db=db,
                         task_id=task_id,
@@ -691,6 +699,8 @@ class PlanfixWebhookHandler:
                         counterparty_id=counterparty_id,
                         project_id=project_id,
                         template_id=template_id,
+                        user_telegram_id=user_telegram_id,
+                        created_by_bot=created_by_bot,
                         date_of_last_update=datetime.now()
                     )
                     logger.debug(f"✅ Updated task {task_id} in TaskCache (status: {new_status_id})")
