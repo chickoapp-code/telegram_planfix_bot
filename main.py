@@ -11,10 +11,13 @@
 
 import argparse
 import asyncio
+import json
 import logging
+import os
 import signal
 import socket
 import sys
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot, Dispatcher
@@ -126,25 +129,64 @@ async def run_polling(bot: Bot, dp: Dispatcher):
         logger.info("✅ Polling stopped")
 
 
+def find_available_port(host: str, start_port: int, max_attempts: int = 10) -> Optional[int]:
+    """Находит свободный порт, начиная с start_port."""
+    for port in range(start_port, start_port + max_attempts):
+        if is_port_available(host, port):
+            return port
+    return None
+
+
 def is_port_available(host: str, port: int) -> bool:
     """Проверяет, доступен ли порт для использования."""
+    # #region agent log
+    try:
+        with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,C","location":"main.py:129","message":"is_port_available entry","data":{"host":host,"port":port},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+    except: pass
+    # #endregion
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1)
             result = sock.connect_ex((host, port))
+            # #region agent log
+            try:
+                with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,C","location":"main.py:134","message":"socket.connect_ex result","data":{"host":host,"port":port,"result":result,"port_available":result!=0},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+            except: pass
+            # #endregion
             return result != 0  # Порт доступен, если соединение не удалось
-    except Exception:
+    except Exception as e:
+        # #region agent log
+        try:
+            with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:137","message":"is_port_available exception","data":{"host":host,"port":port,"error":str(e)},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+        except: pass
+        # #endregion
         return False
 
 
 async def run_both(bot: Bot, dp: Dispatcher, webhook_host: str = '127.0.0.1', webhook_port: int = 8080):
     """Запускает бота и webhook сервер одновременно."""
+    # #region agent log
+    try:
+        with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,C","location":"main.py:140","message":"run_both entry","data":{"webhook_host":webhook_host,"webhook_port":webhook_port},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+    except: pass
+    # #endregion
     logger.info("=" * 80)
     logger.info("🚀 Starting bot in polling mode + webhook server")
     logger.info("=" * 80)
     
     # Проверяем доступность порта перед запуском
-    if not is_port_available(webhook_host, webhook_port):
+    port_check_result = is_port_available(webhook_host, webhook_port)
+    # #region agent log
+    try:
+        with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,C","location":"main.py:147","message":"port check result","data":{"webhook_host":webhook_host,"webhook_port":webhook_port,"port_available":port_check_result},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+    except: pass
+    # #endregion
+    if not port_check_result:
         logger.error("=" * 80)
         logger.error(f"❌ Port {webhook_port} is already in use on {webhook_host}")
         logger.error("=" * 80)
@@ -167,7 +209,19 @@ async def run_both(bot: Bot, dp: Dispatcher, webhook_host: str = '127.0.0.1', we
     
     try:
         await site.start()
+        # #region agent log
+        try:
+            with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:169","message":"site.start success","data":{"webhook_host":webhook_host,"webhook_port":webhook_port},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+        except: pass
+        # #endregion
     except OSError as e:
+        # #region agent log
+        try:
+            with open(r'b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:171","message":"site.start OSError","data":{"webhook_host":webhook_host,"webhook_port":webhook_port,"errno":e.errno,"error":str(e)},"timestamp":int(datetime.now().timestamp()*1000)})+'\n')
+        except: pass
+        # #endregion
         if e.errno == 98 or "address already in use" in str(e).lower():
             logger.error("=" * 80)
             logger.error(f"❌ Failed to bind to {webhook_host}:{webhook_port}")
@@ -237,11 +291,18 @@ async def main():
         help=f'Порт для webhook сервера (по умолчанию: {settings.webhook_port} из .env или 8080)'
     )
     
+    parser.add_argument(
+        '--auto-port',
+        action='store_true',
+        help='Автоматически найти свободный порт, если указанный занят'
+    )
+    
     args = parser.parse_args()
     
     # Определяем хост и порт для webhook
     webhook_host = args.webhook_host if args.webhook_host is not None else settings.webhook_host
     webhook_port = args.webhook_port if args.webhook_port is not None else settings.webhook_port
+    auto_port = args.auto_port
     
     # Предупреждение о безопасности, если используется 0.0.0.0
     if webhook_host == '0.0.0.0':
