@@ -478,17 +478,34 @@ class TaskNotificationService:
                     assignee_contact_ids.append(planfix_contact_id)
                     logger.debug(f"Added executor {executor.telegram_id} (contact_id={planfix_contact_id}) to assignment list")
             
-            # Автоматически назначаем всех подходящих исполнителей в Planfix
+            # Автоматически назначаем всех подходящих исполнителей в Planfix и меняем статус на "В работе"
             if assignee_contact_ids:
                 try:
-                    logger.info(f"Auto-assigning {len(assignee_contact_ids)} executor(s) to task {task_id}")
+                    logger.info(f"Auto-assigning {len(assignee_contact_ids)} executor(s) to task {task_id} and setting status to IN_PROGRESS")
+                    
+                    # Получаем ID статуса "В работе"
+                    from services.status_registry import StatusKey, require_status_id, ensure_status_registry_loaded
+                    await ensure_status_registry_loaded()
+                    in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
+                    
+                    update_kwargs = {
+                        "assignee_contacts": assignee_contact_ids
+                    }
+                    
+                    # Если статус "В работе" найден, устанавливаем его
+                    if in_progress_status_id:
+                        update_kwargs["status_id"] = in_progress_status_id
+                        logger.info(f"Setting task {task_id} status to IN_PROGRESS (status_id={in_progress_status_id})")
+                    else:
+                        logger.warning(f"IN_PROGRESS status ID not found, assigning executors without status change")
+                    
                     update_response = await planfix_client.update_task(
                         task_id,
-                        assignee_contacts=assignee_contact_ids
+                        **update_kwargs
                     )
                     
                     if update_response and update_response.get('result') == 'success':
-                        logger.info(f"✅ Successfully assigned {len(assignee_contact_ids)} executor(s) to task {task_id}")
+                        logger.info(f"✅ Successfully assigned {len(assignee_contact_ids)} executor(s) to task {task_id} and set status to IN_PROGRESS")
                     else:
                         logger.warning(f"Failed to assign executors to task {task_id}: {update_response}")
                 except Exception as assign_err:

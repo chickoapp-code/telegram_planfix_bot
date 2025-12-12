@@ -155,19 +155,42 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
 
         # Получаем task_id из BotLog для этого пользователя
         logs = await db_manager.get_bot_logs_by_telegram_id(user_id, action='create_task')
+        
+        logger.debug(f"Found {len(logs or [])} logs for user {user_id} with action 'create_task'")
 
         # Собираем уникальные ID задач (int)
         bot_task_ids = []
         for log in logs or []:
             try:
                 details = log.details or {}
-                task_id_val = details.get('task_id')
+                if not details:
+                    logger.debug(f"Log {log.id} has no details")
+                    continue
+                    
+                # Пробуем получить task_id из разных полей
+                task_id_val = details.get('task_id') or details.get('task_id_general') or details.get('task_id_internal')
                 if task_id_val is not None:
-                    bot_task_ids.append(int(str(task_id_val).split(':')[-1]))
-            except Exception:
+                    # Нормализуем ID (может быть строкой вида "task:123" или числом)
+                    if isinstance(task_id_val, str):
+                        if ':' in task_id_val:
+                            task_id_val = task_id_val.split(':')[-1]
+                        try:
+                            task_id_int = int(task_id_val)
+                            bot_task_ids.append(task_id_int)
+                            logger.debug(f"Added task_id {task_id_int} from log {log.id}")
+                        except (ValueError, TypeError):
+                            logger.warning(f"Could not convert task_id_val '{task_id_val}' to int from log {log.id}")
+                    elif isinstance(task_id_val, (int, float)):
+                        bot_task_ids.append(int(task_id_val))
+                        logger.debug(f"Added task_id {int(task_id_val)} from log {log.id}")
+            except Exception as e:
+                logger.warning(f"Error processing log {log.id if hasattr(log, 'id') else 'unknown'}: {e}")
                 continue
 
+        logger.info(f"Collected {len(bot_task_ids)} unique task IDs for user {user_id}")
+        
         if not bot_task_ids:
+            logger.info(f"No task IDs found for user {user_id} in BotLog")
             return []
 
         # Сортируем по убыванию и применяем лимит
@@ -1651,20 +1674,43 @@ async def list_my_tickets(message: Message, state: FSMContext):
 
         # Фильтруем только заявки со статусами "Новая" и "В работе"
         # Также проверяем по названию статуса на случай если ID не совпадает
-        allowed_status_names = {'новая', 'new', 'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется'}
+        allowed_status_names = {
+            'новая', 'new', 'новое', 'новый',
+            'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется',
+            'работа', 'working', 'active', 'активная', 'активное'
+        }
         
         active_tasks = []
         for t in tasks:
             status_id = normalize_status_id(t.get('status', {}).get('id'))
             status_name = t.get('status', {}).get('name', 'Неизвестно')
-            status_name_lower = status_name.lower() if status_name else ''
+            status_name_lower = (status_name.lower().strip() if status_name else '')
             
             # Логируем для отладки
-            logger.debug(f"Task #{t['id']}: status_id={status_id}, status_name={status_name}, is_allowed_by_id={status_id in allowed_status_ids}, is_allowed_by_name={status_name_lower in allowed_status_names}")
+            logger.info(f"Task #{t.get('id', 'unknown')}: status_id={status_id}, status_name='{status_name}', is_allowed_by_id={status_id in allowed_status_ids if status_id else False}, is_allowed_by_name={status_name_lower in allowed_status_names}")
             
-            # Добавляем только если статус "Новая" или "В работе" (проверяем и по ID, и по названию)
-            if status_id in allowed_status_ids or status_name_lower in allowed_status_names:
+            # Проверяем соответствие по ID
+            is_allowed_by_id = status_id is not None and status_id in allowed_status_ids
+            
+            # Проверяем соответствие по названию (более гибкая проверка)
+            is_allowed_by_name = False
+            if status_name_lower:
+                # Проверяем точное совпадение
+                if status_name_lower in allowed_status_names:
+                    is_allowed_by_name = True
+                else:
+                    # Проверяем частичное совпадение (содержит ключевые слова)
+                    for allowed_name in allowed_status_names:
+                        if allowed_name in status_name_lower or status_name_lower in allowed_name:
+                            is_allowed_by_name = True
+                            break
+            
+            # Добавляем если соответствует по ID или по названию
+            if is_allowed_by_id or is_allowed_by_name:
                 active_tasks.append(t)
+                logger.debug(f"Task #{t.get('id')} added to active tasks (status: {status_name})")
+            else:
+                logger.debug(f"Task #{t.get('id')} filtered out (status: {status_name}, id: {status_id})")
 
         if not active_tasks:
             await message.answer(
