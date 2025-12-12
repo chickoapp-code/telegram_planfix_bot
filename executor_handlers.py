@@ -1503,7 +1503,13 @@ async def show_new_tasks(message: Message, state: FSMContext):
     
     async with lock:
         try:
-
+            # Явно импортируем функции для избежания конфликтов
+            from services.status_registry import (
+                collect_status_ids as _collect_status_ids,
+                StatusKey,
+                require_status_id,
+            )
+            
             await ensure_status_registry_loaded()
             
             allowed_templates = _get_allowed_template_ids(executor)
@@ -1521,7 +1527,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
             )
 
             # Показываем только задачи со статусом "Новая"
-            working_status_ids = collect_status_ids(
+            working_status_ids = _collect_status_ids(
                 (StatusKey.NEW,),
                 required=False,
             )
@@ -1776,7 +1782,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         # ВАЖНО: Исключаем завершенные, отмененные и отклоненные задачи
                         # Даже если они попали в запрос, не показываем их
                         try:
-                            final_status_ids = collect_status_ids(
+                            final_status_ids = _collect_status_ids(
                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
                                 required=False
                             )
@@ -2105,7 +2111,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                         
                                         # Проверяем, не является ли задача завершенной
                                         try:
-                                            final_status_ids = collect_status_ids(
+                                            final_status_ids = _collect_status_ids(
                                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
                                                 required=False
                                             )
@@ -2392,10 +2398,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
 # ============================================================================
 
 # Убрали обработчик "📋 Мои задачи" - функция не нужна
+# Убрали обработчик "📋 Мои задачи" - функция не нужна
 # @router.message(F.text == "📋 Мои задачи")
 # async def show_my_tasks(message: Message, state: FSMContext):
-    """Показать задачи, назначенные на исполнителя."""
-    logger.info(f"Handler 'show_my_tasks' called for user {message.from_user.id}, text: '{message.text}'")
+#     """Показать задачи, назначенные на исполнителя."""
+#     logger.info(f"Handler 'show_my_tasks' called for user {message.from_user.id}, text: '{message.text}'")
     # Очищаем состояние FSM, чтобы кнопки меню работали всегда
     await state.clear()
     
