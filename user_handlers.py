@@ -1874,73 +1874,16 @@ async def list_my_tickets(message: Message, state: FSMContext):
         return
     
     try:
-        tasks = await get_user_tasks(message.from_user.id, limit=20)
+        # Получаем только активные заявки (Новая и В работе)
+        tasks = await get_user_tasks(message.from_user.id, limit=20, only_active=True)
         if tasks is None:
             logger.error("get_user_tasks returned None")
             await message.answer("❌ Не удалось загрузить список заявок.")
             return
 
-        logger.info(f"Found {len(tasks)} tasks for user {message.from_user.id}")
+        logger.info(f"Found {len(tasks)} active tasks for user {message.from_user.id}")
 
-        # Получаем ID статусов "Новая" и "В работе"
-        await ensure_status_registry_loaded()
-        new_status_id = require_status_id(StatusKey.NEW)
-        in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
-        allowed_status_ids = {new_status_id, in_progress_status_id}
-        logger.debug(f"Allowed status IDs for 'Мои заявки': {allowed_status_ids} (NEW={new_status_id}, IN_PROGRESS={in_progress_status_id})")
-
-        def normalize_status_id(sid):
-            if isinstance(sid, str) and ':' in sid:
-                try:
-                    return int(sid.split(':')[1])
-                except ValueError:
-                    return None
-            try:
-                return int(sid) if sid is not None else None
-            except (TypeError, ValueError):
-                return None
-
-        # Фильтруем только заявки со статусами "Новая" и "В работе"
-        # Также проверяем по названию статуса на случай если ID не совпадает
-        allowed_status_names = {
-            'новая', 'new', 'новое', 'новый',
-            'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется',
-            'работа', 'working', 'active', 'активная', 'активное'
-        }
-        
-        active_tasks = []
-        for t in tasks:
-            status_id = normalize_status_id(t.get('status', {}).get('id'))
-            status_name = t.get('status', {}).get('name', 'Неизвестно')
-            status_name_lower = (status_name.lower().strip() if status_name else '')
-            
-            # Логируем для отладки
-            logger.info(f"Task #{t.get('id', 'unknown')}: status_id={status_id}, status_name='{status_name}', is_allowed_by_id={status_id in allowed_status_ids if status_id else False}, is_allowed_by_name={status_name_lower in allowed_status_names}")
-            
-            # Проверяем соответствие по ID
-            is_allowed_by_id = status_id is not None and status_id in allowed_status_ids
-            
-            # Проверяем соответствие по названию (более гибкая проверка)
-            is_allowed_by_name = False
-            if status_name_lower:
-                # Проверяем точное совпадение
-                if status_name_lower in allowed_status_names:
-                    is_allowed_by_name = True
-                else:
-                    # Проверяем частичное совпадение (содержит ключевые слова)
-                    for allowed_name in allowed_status_names:
-                        if allowed_name in status_name_lower or status_name_lower in allowed_name:
-                            is_allowed_by_name = True
-                            break
-            
-            # Добавляем если соответствует по ID или по названию
-            if is_allowed_by_id or is_allowed_by_name:
-                active_tasks.append(t)
-                logger.debug(f"Task #{t.get('id')} added to active tasks (status: {status_name})")
-            else:
-                logger.debug(f"Task #{t.get('id')} filtered out (status: {status_name}, id: {status_id})")
-
-        if not active_tasks:
+        if not tasks:
             await message.answer(
                 "📋 У вас нет активных заявок.\n\n"
                 "Создайте новую заявку, нажав кнопку 'Создать заявку'."
@@ -1948,7 +1891,7 @@ async def list_my_tickets(message: Message, state: FSMContext):
             return
 
         lines = ["📋 Ваши активные заявки:\n"]
-        for t in active_tasks:
+        for t in tasks:
             status_name = t.get('status', {}).get('name', 'Неизвестно')
             task_name = t.get('name', 'Без названия')
             lines.append(f"#{t['id']} – {status_name}\n{task_name}\n")
@@ -2624,73 +2567,15 @@ async def cancel_task_start(message: Message, state: FSMContext):
         await message.answer("❌ Сначала пройдите регистрацию: /start")
         return
     
-    # Получаем список заявок пользователя и фильтруем только "Новая" и "В работе"
-    tasks = await get_user_tasks(message.from_user.id, limit=50)
+    # Получаем только активные заявки (Новая и В работе)
+    tasks = await get_user_tasks(message.from_user.id, limit=50, only_active=True)
     
     if not tasks:
-        await message.answer(
-            "📋 У вас пока нет заявок.\n\n"
-            "Создайте первую заявку, нажав кнопку 'Создать заявку'."
-        )
-        return
-    
-    # Фильтруем только заявки со статусами "Новая" и "В работе"
-    await ensure_status_registry_loaded()
-    new_status_id = require_status_id(StatusKey.NEW)
-    in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
-    allowed_status_ids = {new_status_id, in_progress_status_id}
-    
-    def normalize_status_id(sid):
-        if isinstance(sid, str) and ':' in sid:
-            try:
-                return int(sid.split(':')[1])
-            except ValueError:
-                return None
-        try:
-            return int(sid) if sid is not None else None
-        except (TypeError, ValueError):
-            return None
-    
-    allowed_status_names = {
-        'новая', 'new', 'новое', 'новый',
-        'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется',
-        'работа', 'working', 'active', 'активная', 'активное'
-    }
-    
-    active_tasks = []
-    for t in tasks:
-        status_id = normalize_status_id(t.get('status', {}).get('id'))
-        status_name = t.get('status', {}).get('name', 'Неизвестно')
-        status_name_lower = (status_name.lower().strip() if status_name else '')
-        
-        # Проверяем соответствие по ID
-        is_allowed_by_id = status_id is not None and status_id in allowed_status_ids
-        
-        # Проверяем соответствие по названию (более гибкая проверка)
-        is_allowed_by_name = False
-        if status_name_lower:
-            # Проверяем точное совпадение
-            if status_name_lower in allowed_status_names:
-                is_allowed_by_name = True
-            else:
-                # Проверяем частичное совпадение (содержит ключевые слова)
-                for allowed_name in allowed_status_names:
-                    if allowed_name in status_name_lower or status_name_lower in allowed_name:
-                        is_allowed_by_name = True
-                        break
-        
-        # Добавляем если соответствует по ID или по названию
-        if is_allowed_by_id or is_allowed_by_name:
-            active_tasks.append(t)
-    
-    if not active_tasks:
         await message.answer(
             "📋 У вас нет заявок со статусом 'Новая' или 'В работе' для отмены.\n\n"
             "Отменить можно только заявки в этих статусах."
         )
         return
-    
-    tasks = active_tasks
     
     # Создаем клавиатуру с заявками
     keyboard = create_tasks_keyboard(tasks, action_type="cancel")

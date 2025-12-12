@@ -2393,12 +2393,152 @@ async def show_my_tasks(message: Message, state: FSMContext):
                 TaskAssignment.status == "active"
             ).all()
 
+        # Если нет активных TaskAssignment, ищем задачи по assignees в Planfix
         if not assignments:
-            await message.answer(
-                "📋 У вас нет принятых задач.\n\n"
-                "Вы ещё не взяли ни одной заявки в работу."
-            )
-            return
+            logger.debug(f"No active TaskAssignment found for executor {executor.telegram_id}, trying to find tasks via assignees in Planfix")
+            try:
+                # Получаем planfix_user_id исполнителя
+                planfix_user_id = executor.planfix_user_id or executor.planfix_contact_id
+                if not planfix_user_id:
+                    await message.answer(
+                        "📋 У вас нет принятых задач.\n\n"
+                        "Вы ещё не взяли ни одной заявки в работу."
+                    )
+                    return
+                
+                # Ищем задачи, где исполнитель назначен через API Planfix
+                # Получаем список задач со статусами "Новая" и "В работе", где исполнитель назначен
+                from services.status_registry import require_status_id, StatusKey
+                await ensure_status_registry_loaded()
+                new_status_id = require_status_id(StatusKey.NEW)
+                in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
+                working_status_ids = [s for s in [new_status_id, in_progress_status_id] if s is not None]
+                
+                if not working_status_ids:
+                    await message.answer(
+                        "📋 У вас нет принятых задач.\n\n"
+                        "Вы ещё не взяли ни одной заявки в работу."
+                    )
+                    return
+                
+                # Получаем задачи со статусами "Новая" и "В работе"
+                all_tasks = []
+                for status_id in working_status_ids:
+                    try:
+                        tasks_response = await planfix_client.get_task_list(
+                            filters=[{"type": 10, "operator": "equal", "value": status_id}],
+                            fields="id,name,status,assignees,dateTime",
+                            page_size=100
+                        )
+                        if tasks_response and tasks_response.get('result') == 'success':
+                            tasks = tasks_response.get('tasks', [])
+                            all_tasks.extend(tasks)
+                    except Exception as e:
+                        logger.error(f"Error fetching tasks with status {status_id}: {e}")
+                
+                # Фильтруем задачи, где исполнитель назначен
+                executor_tasks = []
+                planfix_user_id_str = str(planfix_user_id)
+                for task in all_tasks:
+                    assignees = task.get('assignees', {}).get('users', [])
+                    if not isinstance(assignees, list):
+                        assignees = [assignees] if assignees else []
+                    
+                    # Проверяем, назначен ли исполнитель на задачу
+                    is_assigned = False
+                    for assignee in assignees:
+                        assignee_id = None
+                        if isinstance(assignee, dict):
+                            assignee_id = str(assignee.get('id', ''))
+                        elif isinstance(assignee, str):
+                            assignee_id = assignee
+                        
+                        if assignee_id and (planfix_user_id_str in assignee_id or assignee_id in planfix_user_id_str):
+                            is_assigned = True
+                            break
+                    
+                    if is_assigned:
+                        executor_tasks.append(task)
+                
+                if not executor_tasks:
+                    await message.answer(
+                        "📋 У вас нет принятых задач.\n\n"
+                        "Вы ещё не взяли ни одной заявки в работу."
+                    )
+                    return
+                
+                # Используем найденные задачи вместо assignments
+                tasks = []
+                for task in executor_tasks:
+                    try:
+                        task_id = task.get('id')
+                        if isinstance(task_id, str) and ':' in task_id:
+                            task_id = int(task_id.split(':')[-1])
+                        else:
+                            task_id = int(task_id)
+                        
+                        # Получаем полную информацию о задаче
+                        tr = await planfix_client.get_task_by_id(
+                            task_id,
+                            fields="id,name,status,statusId,project.id,project.name,counterparty.id,counterparty.name,dateTime"
+                        )
+                        if tr and tr.get('result') == 'success':
+                            t = tr.get('task', {})
+                            # Фильтруем финальные статусы
+                            raw_status_id = t.get('status', {}).get('id')
+                            sid = None
+                            if isinstance(raw_status_id, int):
+                                sid = raw_status_id
+                            elif isinstance(raw_status_id, str):
+                                try:
+                                    sid = int(str(raw_status_id).split(':')[-1])
+                                except Exception:
+                                    sid = None
+                            if sid is None:
+                                alt_status_id = t.get('statusId') or t.get('status_id')
+                                if isinstance(alt_status_id, int):
+                                    sid = alt_status_id
+                                elif isinstance(alt_status_id, str):
+                                    try:
+                                        sid = int(str(alt_status_id).split(':')[-1])
+                                    except Exception:
+                                        sid = None
+                            from services.status_registry import collect_status_ids, StatusKey
+                            final_status_ids = set(
+                                collect_status_ids(
+                                    (
+                                        StatusKey.COMPLETED,
+                                        StatusKey.FINISHED,
+                                        StatusKey.CANCELLED,
+                                        StatusKey.REJECTED,
+                                    ),
+                                    required=False,
+                                )
+                            )
+                            sname_text = ((t.get('status', {}) or {}).get('name') or '').strip().lower()
+                            is_final_by_name = any(k in sname_text for k in ["выполн", "заверш", "отмен", "отклон"])
+                            if sid not in final_status_ids and not is_final_by_name:
+                                tasks.append(t)
+                    except Exception as e:
+                        logger.error(f"Error processing task from assignees: {e}")
+                        continue
+                
+                if not tasks:
+                    await message.answer(
+                        "📋 У вас нет активных принятых задач.\n\n"
+                        "Все принятые задачи завершены."
+                    )
+                    return
+                
+                logger.info(f"Found {len(tasks)} tasks for executor {executor.telegram_id} via assignees in Planfix")
+            except Exception as e:
+                logger.error(f"Error finding tasks via assignees for executor {executor.telegram_id}: {e}", exc_info=True)
+                await message.answer(
+                    "📋 У вас нет принятых задач.\n\n"
+                    "Вы ещё не взяли ни одной заявки в работу."
+                )
+                return
+        else:
 
         tasks = []
         for a in assignments:

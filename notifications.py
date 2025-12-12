@@ -571,8 +571,10 @@ class NotificationService:
                     except Exception as e:
                         logger.error(f"Fallback BotLog notify error for task {task_id}: {e}", exc_info=True)
 
-            # 2) Исполнители: из локальных назначений (TaskAssignment)
+            # 2) Исполнители: из локальных назначений (TaskAssignment) и из assignees в задаче
             if send_to_execs:
+                executors_notified = set()
+                # Сначала ищем в TaskAssignment
                 try:
                     with self.db_manager.get_db() as db:
                         accepted = db.query(TaskAssignment).filter(
@@ -583,11 +585,73 @@ class NotificationService:
                             try:
                                 await self._send_notification(a.executor_telegram_id, message, media_files=media_files)
                                 notified_any = True
-                                logger.info(f"Notified executor {a.executor_telegram_id} about comment in task {task_id}")
+                                executors_notified.add(a.executor_telegram_id)
+                                logger.info(f"✅ Notified executor {a.executor_telegram_id} about comment in task {task_id} (from TaskAssignment)")
                             except Exception as se:
                                 logger.error(f"Error notifying executor tg:{a.executor_telegram_id} for task {task_id}: {se}")
                 except Exception as e:
                     logger.error(f"Error loading local assignments for task {task_id}: {e}", exc_info=True)
+                
+                # Фолбэк: если не нашли в TaskAssignment, ищем по assignees в задаче из Planfix
+                if not executors_notified:
+                    try:
+                        logger.debug(f"No active TaskAssignment found for task {task_id}, trying to find executors via assignees in task")
+                        task_with_assignees = await self.planfix_client.get_task_by_id(
+                            task_id,
+                            fields="id,assignees"
+                        )
+                        if task_with_assignees and task_with_assignees.get('result') == 'success':
+                            task_data = task_with_assignees.get('task', {})
+                            assignees = task_data.get('assignees', {}).get('users', [])
+                            
+                            if assignees:
+                                logger.info(f"Found {len(assignees)} assignees in task {task_id} from Planfix")
+                                # Нормализуем assignees (может быть список или один объект)
+                                if not isinstance(assignees, list):
+                                    assignees = [assignees]
+                                
+                                with self.db_manager.get_db() as db:
+                                    for assignee in assignees:
+                                        try:
+                                            # Получаем ID пользователя/контакта из assignee
+                                            assignee_id = None
+                                            if isinstance(assignee, dict):
+                                                assignee_id = assignee.get('id')
+                                            elif isinstance(assignee, str):
+                                                assignee_id = assignee
+                                            
+                                            if not assignee_id:
+                                                continue
+                                            
+                                            # Нормализуем ID (может быть строка с "user:123" или просто число)
+                                            if isinstance(assignee_id, str):
+                                                if ':' in assignee_id:
+                                                    assignee_id = assignee_id.split(':')[-1]
+                                                try:
+                                                    assignee_id = int(assignee_id)
+                                                except ValueError:
+                                                    continue
+                                            
+                                            # Ищем исполнителя по planfix_user_id или planfix_contact_id
+                                            executor = db.query(ExecutorProfile).filter(
+                                                (ExecutorProfile.planfix_user_id == str(assignee_id)) |
+                                                (ExecutorProfile.planfix_contact_id == str(assignee_id))
+                                            ).first()
+                                            
+                                            if executor and executor.telegram_id not in executors_notified:
+                                                try:
+                                                    await self._send_notification(executor.telegram_id, message, media_files=media_files)
+                                                    notified_any = True
+                                                    executors_notified.add(executor.telegram_id)
+                                                    logger.info(f"✅ Notified executor {executor.telegram_id} about comment in task {task_id} (found via assignees, planfix_id={assignee_id})")
+                                                except Exception as se:
+                                                    logger.error(f"Error notifying executor tg:{executor.telegram_id} for task {task_id}: {se}")
+                                        except Exception as assignee_err:
+                                            logger.warning(f"Error processing assignee {assignee} for task {task_id}: {assignee_err}")
+                            else:
+                                logger.debug(f"No assignees found in task {task_id} from Planfix")
+                    except Exception as e:
+                        logger.error(f"Error finding executors via assignees for task {task_id}: {e}", exc_info=True)
 
             if not notified_any:
                 logger.warning(f"No notifications sent for comment in task {task_id} (recipients={recipients})")
