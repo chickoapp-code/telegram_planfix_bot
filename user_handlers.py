@@ -1451,22 +1451,18 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     # Используем новый сервис, который применяет те же фильтры, что и show_new_tasks
                     from task_notification_service import TaskNotificationService
                     task_notification_service = TaskNotificationService(message.bot)
-                    # Вызываем уведомление асинхронно, чтобы не блокировать создание задачи
                     # ВАЖНО: Используем generalId для уведомлений, так как API может не работать с внутренним ID
-                    logger.info(f"📤 Scheduling notification for task {notification_task_id} (generalId) to executors (internal_id={task_id})")
-                    notification_task = asyncio.create_task(
-                        task_notification_service.notify_executors_about_new_task(notification_task_id)
-                    )
-                    # Добавляем обработку ошибок для задачи
-                    def log_notification_error(task):
-                        try:
-                            task.result()  # Получаем результат, чтобы увидеть исключение если есть
-                        except Exception as e:
-                            logger.error(f"❌ Notification task for {task_id} failed: {e}", exc_info=True)
-                    notification_task.add_done_callback(log_notification_error)
-                    logger.info(f"✅ Notification task scheduled for new task {task_id} (using task_notification_service)")
+                    logger.info(f"📤 Starting notification for task {notification_task_id} (generalId) to executors (internal_id={task_id})")
+                    try:
+                        # Вызываем уведомление синхронно (await), чтобы гарантировать выполнение
+                        # Это важно для автоматического назначения исполнителей
+                        await task_notification_service.notify_executors_about_new_task(notification_task_id)
+                        logger.info(f"✅ Notification completed for new task {task_id} (using task_notification_service)")
+                    except Exception as notify_err:
+                        logger.error(f"❌ Failed to notify executors for task {task_id}: {notify_err}", exc_info=True)
+                        # Не прерываем создание задачи из-за ошибки уведомления
                 except Exception as notify_err:
-                    logger.error(f"❌ Failed to schedule notification to executors for task {task_id}: {notify_err}", exc_info=True)
+                    logger.error(f"❌ Failed to initialize notification service for task {task_id}: {notify_err}", exc_info=True)
                     # Не прерываем создание задачи из-за ошибки уведомления
                 
                 # Предзаполняем кэш именем ресторана для задачи (cp_name:<task_id>)
@@ -1601,8 +1597,8 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                     f"✅ <b>Заявка успешно создана!</b>\n\n"
                     f"📋 <b>Номер заявки:</b> #{task_id}\n"
                     f"📝 <b>Тип:</b> {template_info.get('name', 'Заявка')}\n"
-                    f"📊 <b>Статус:</b> Новая\n\n"
-                    "🔔 Вы получите уведомление, когда заявка будет принята в работу.",
+                    f"📊 <b>Статус:</b> В работе\n\n"
+                    "Исполнители назначены автоматически и уже приступают к задаче.",
                     reply_markup=get_main_menu_keyboard(),
                     parse_mode="HTML"
                 )
@@ -2396,15 +2392,73 @@ async def cancel_task_start(message: Message, state: FSMContext):
         await message.answer("❌ Сначала пройдите регистрацию: /start")
         return
     
-    # Получаем список активных заявок пользователя
-    tasks = await get_user_tasks(message.from_user.id, limit=50, only_active=True)
+    # Получаем список заявок пользователя и фильтруем только "Новая" и "В работе"
+    tasks = await get_user_tasks(message.from_user.id, limit=50)
     
     if not tasks:
         await message.answer(
-            "📋 У вас пока нет активных заявок.\n\n"
+            "📋 У вас пока нет заявок.\n\n"
             "Создайте первую заявку, нажав кнопку 'Создать заявку'."
         )
         return
+    
+    # Фильтруем только заявки со статусами "Новая" и "В работе"
+    await ensure_status_registry_loaded()
+    new_status_id = require_status_id(StatusKey.NEW)
+    in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
+    allowed_status_ids = {new_status_id, in_progress_status_id}
+    
+    def normalize_status_id(sid):
+        if isinstance(sid, str) and ':' in sid:
+            try:
+                return int(sid.split(':')[1])
+            except ValueError:
+                return None
+        try:
+            return int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            return None
+    
+    allowed_status_names = {
+        'новая', 'new', 'новое', 'новый',
+        'в работе', 'в работе', 'in progress', 'in_progress', 'выполняется',
+        'работа', 'working', 'active', 'активная', 'активное'
+    }
+    
+    active_tasks = []
+    for t in tasks:
+        status_id = normalize_status_id(t.get('status', {}).get('id'))
+        status_name = t.get('status', {}).get('name', 'Неизвестно')
+        status_name_lower = (status_name.lower().strip() if status_name else '')
+        
+        # Проверяем соответствие по ID
+        is_allowed_by_id = status_id is not None and status_id in allowed_status_ids
+        
+        # Проверяем соответствие по названию (более гибкая проверка)
+        is_allowed_by_name = False
+        if status_name_lower:
+            # Проверяем точное совпадение
+            if status_name_lower in allowed_status_names:
+                is_allowed_by_name = True
+            else:
+                # Проверяем частичное совпадение (содержит ключевые слова)
+                for allowed_name in allowed_status_names:
+                    if allowed_name in status_name_lower or status_name_lower in allowed_name:
+                        is_allowed_by_name = True
+                        break
+        
+        # Добавляем если соответствует по ID или по названию
+        if is_allowed_by_id or is_allowed_by_name:
+            active_tasks.append(t)
+    
+    if not active_tasks:
+        await message.answer(
+            "📋 У вас нет заявок со статусом 'Новая' или 'В работе' для отмены.\n\n"
+            "Отменить можно только заявки в этих статусах."
+        )
+        return
+    
+    tasks = active_tasks
     
     # Создаем клавиатуру с заявками
     keyboard = create_tasks_keyboard(tasks, action_type="cancel")

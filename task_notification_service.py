@@ -565,7 +565,7 @@ class TaskNotificationService:
                         f"🆕 Новая заявка #{task_id}\n\n"
                         f"📝 {task_name}\n"
                         f"🏪 Ресторан: {counterparty_name}\n"
-                        f"📊 Статус: Новая\n\n"
+                        f"📊 Статус: В работе\n\n"
                         f"Вы автоматически назначены исполнителем. Начните работу над задачей."
                     )
                     
