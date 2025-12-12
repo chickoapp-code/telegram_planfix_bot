@@ -230,6 +230,33 @@ class TaskNotificationService:
             task = task_response.get('task', {})
             task_name = task.get('name', 'Без названия')
             
+            # ВАЖНО: Для обновления задачи нужен внутренний ID, а не generalId
+            # Извлекаем внутренний ID из ответа API
+            task_internal_id = None
+            task_general_id = None
+            task_id_from_response = task.get('id')
+            
+            if task_id_from_response:
+                # ID может быть в формате "task:123" или просто числом
+                if isinstance(task_id_from_response, str) and ':' in task_id_from_response:
+                    try:
+                        task_internal_id = int(task_id_from_response.split(':')[-1])
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(task_id_from_response, (int, float)):
+                    task_internal_id = int(task_id_from_response)
+            
+            # Также получаем generalId если он есть
+            task_general_id = task.get('generalId') or task_id
+            
+            # Для обновления используем внутренний ID, если он есть, иначе используем переданный task_id
+            task_id_for_update = task_internal_id if task_internal_id else task_id
+            
+            logger.info(
+                f"Task IDs for update: internal_id={task_internal_id}, general_id={task_general_id}, "
+                f"will use {task_id_for_update} for update_task"
+            )
+            
             # Извлекаем данные задачи
             template_id = _normalize_pf_id((task.get('template') or {}).get('id'))
             counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
@@ -526,10 +553,13 @@ class TaskNotificationService:
                     await ensure_status_registry_loaded()
                     in_progress_status_id = require_status_id(StatusKey.IN_PROGRESS)
                     
-                    update_kwargs = {
-                        "assignee_contacts": assignee_contact_ids if assignee_contact_ids else None,
-                        "assignee_users": assignee_user_ids if assignee_user_ids else None,
-                    }
+                    # Формируем параметры для обновления задачи
+                    # Не передаем None значения, чтобы не перезаписывать существующие данные
+                    update_kwargs = {}
+                    if assignee_contact_ids:
+                        update_kwargs["assignee_contacts"] = assignee_contact_ids
+                    if assignee_user_ids:
+                        update_kwargs["assignee_users"] = assignee_user_ids
                     
                     # Если статус "В работе" найден, устанавливаем его
                     if in_progress_status_id:
@@ -538,17 +568,20 @@ class TaskNotificationService:
                     else:
                         logger.warning(f"IN_PROGRESS status ID not found, assigning executors without status change")
                     
+                    # Используем внутренний ID для обновления задачи
+                    logger.info(f"Calling update_task with task_id={task_id_for_update}, kwargs={update_kwargs}")
                     update_response = await planfix_client.update_task(
-                        task_id,
+                        task_id_for_update,
                         **update_kwargs
                     )
                     
                     if update_response and update_response.get('result') == 'success':
                         total_assigned = len(assignee_contact_ids) + len(assignee_user_ids)
                         logger.info(
-                            f"✅ Successfully assigned {total_assigned} executor(s) to task {task_id} "
-                            f"(contacts={len(assignee_contact_ids)}, users={len(assignee_user_ids)}) "
-                            f"and set status to IN_PROGRESS"
+                            f"✅ Successfully assigned {total_assigned} executor(s) to task {task_id_for_update} "
+                            f"(internal_id={task_internal_id}, general_id={task_general_id}, "
+                            f"contacts={assignee_contact_ids}, users={assignee_user_ids}) "
+                            f"and set status to IN_PROGRESS (status_id={in_progress_status_id})"
                         )
                         
                         # Создаем записи о назначении в локальной БД, чтобы "📋 Мои задачи" показывал принятые заявки
@@ -556,9 +589,11 @@ class TaskNotificationService:
                             from database import TaskAssignment
                             with self.db_manager.get_db() as db:
                                 for executor in matching_executors:
+                                    # Используем internal_id для TaskAssignment, если он есть
+                                    task_id_for_db = task_internal_id if task_internal_id else task_id_for_update
                                     # Пропускаем, если уже есть активное назначение
                                     existing = db.query(TaskAssignment).filter(
-                                        TaskAssignment.task_id == task_id,
+                                        TaskAssignment.task_id == task_id_for_db,
                                         TaskAssignment.executor_telegram_id == executor.telegram_id,
                                         TaskAssignment.status == "active"
                                     ).first()
@@ -566,7 +601,7 @@ class TaskNotificationService:
                                         continue
                                     
                                     rec = TaskAssignment(
-                                        task_id=task_id,
+                                        task_id=task_id_for_db,
                                         executor_telegram_id=executor.telegram_id,
                                         planfix_user_id=str(executor.planfix_user_id) if executor.planfix_user_id else None,
                                         status="active"
@@ -578,12 +613,18 @@ class TaskNotificationService:
                             logger.warning(f"Failed to create TaskAssignment records for task {task_id}: {db_err}")
                     else:
                         logger.error(
-                            f"❌ Failed to assign executors to task {task_id}. "
+                            f"❌ Failed to assign executors to task {task_id_for_update} "
+                            f"(internal_id={task_internal_id}, general_id={task_general_id}). "
                             f"Response: {json.dumps(update_response, ensure_ascii=False) if update_response else 'No response'}. "
-                            f"Attempted to assign: contacts={assignee_contact_ids}, users={assignee_user_ids}"
+                            f"Attempted to assign: contacts={assignee_contact_ids}, users={assignee_user_ids}, "
+                            f"update_kwargs={update_kwargs}"
                         )
                 except Exception as assign_err:
-                    logger.error(f"Error assigning executors to task {task_id}: {assign_err}", exc_info=True)
+                    logger.error(
+                        f"Error assigning executors to task {task_id_for_update} "
+                        f"(internal_id={task_internal_id}, general_id={task_general_id}): {assign_err}", 
+                        exc_info=True
+                    )
             
             # Отправляем уведомления всем подходящим исполнителям (без кнопки "Принять")
             notified_count = 0
