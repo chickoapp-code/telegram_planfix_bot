@@ -2224,6 +2224,27 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         except Exception as final_filter_err:
                                                             logger.warning(f"Error checking final status for task {task_id} from BotLog: {final_filter_err}")
                                                         
+                                                        # Дополнительная проверка: проверяем статус из TaskCache (может быть более актуальным)
+                                                        try:
+                                                            with db_manager.get_db() as db:
+                                                                task_cache = db_manager._manager.get_task_cache(db, task_id)
+                                                                if task_cache and task_cache.status_id:
+                                                                    # Проверяем, не является ли статус из кеша финальным
+                                                                    cache_status_id = task_cache.status_id
+                                                                    if cache_status_id in final_status_ids:
+                                                                        logger.debug(f"Task {task_id} from BotLog filtered out: status_id {cache_status_id} from TaskCache is final")
+                                                                        continue
+                                                                    # Если статус из кеша отличается от статуса из API, используем статус из кеша
+                                                                    if cache_status_id != task_status_id_from_log:
+                                                                        logger.debug(f"Task {task_id}: Using status_id {cache_status_id} from TaskCache instead of {task_status_id_from_log} from API")
+                                                                        task_status_id_from_log = cache_status_id
+                                                                        # Проверяем еще раз по обновленному статусу
+                                                                        if cache_status_id in final_status_ids:
+                                                                            logger.debug(f"Task {task_id} from BotLog filtered out: updated status_id {cache_status_id} is final")
+                                                                            continue
+                                                        except Exception as cache_check_err:
+                                                            logger.debug(f"Error checking TaskCache for task {task_id}: {cache_check_err}")
+                                                        
                                                         # Проверяем теги
                                                         task_tag_names = _extract_task_tags(task)
                                                         if allowed_tag_names:
@@ -2310,10 +2331,63 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 )
                 return
 
-            # Формируем список заявок
-            lines = [f"🆕 <b>Новые заявки ({len(all_new_tasks)}):</b>\n"]
+            # Финальная проверка: исключаем задачи с финальными статусами из TaskCache
+            tasks_to_show = []
+            try:
+                from services.status_registry import collect_status_ids as _collect_status_ids, StatusKey, require_status_id
+                final_status_ids = _collect_status_ids(
+                    (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
+                    required=False
+                )
+                if not final_status_ids:
+                    final_status_ids = set()
+                    for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
+                        try:
+                            sid = require_status_id(status_key)
+                            if sid:
+                                final_status_ids.add(sid)
+                        except Exception:
+                            pass
+                
+                with db_manager.get_db() as db:
+                    for task in all_new_tasks:
+                        task_id = task.get('id')
+                        if not task_id:
+                            continue
+                        try:
+                            # Нормализуем task_id
+                            if isinstance(task_id, str) and ':' in task_id:
+                                task_id = int(task_id.split(':')[-1])
+                            else:
+                                task_id = int(task_id)
+                            
+                            # Проверяем статус из TaskCache (более актуальный)
+                            task_cache = db_manager._manager.get_task_cache(db, task_id)
+                            if task_cache and task_cache.status_id:
+                                if task_cache.status_id in final_status_ids:
+                                    logger.debug(f"Task {task_id} filtered out before display: status_id {task_cache.status_id} from TaskCache is final")
+                                    continue
+                            
+                            tasks_to_show.append(task)
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"Error processing task {task_id} for final check: {e}")
+                            tasks_to_show.append(task)  # В случае ошибки все равно показываем
+            except Exception as final_check_err:
+                logger.warning(f"Error in final status check: {final_check_err}")
+                tasks_to_show = all_new_tasks  # В случае ошибки показываем все задачи
             
-            for task in all_new_tasks[:10]:  # Показываем первые 10
+            if not tasks_to_show:
+                await message.answer(
+                    "📋 <b>Новых заявок нет.</b>\n\n"
+                    "Все заявки по вашим концепциям обработаны.",
+                    parse_mode="HTML"
+                )
+                return
+            
+            # Формируем список заявок
+            lines = [f"🆕 <b>Новые заявки ({len(tasks_to_show)}):</b>\n"]
+            
+            for task in tasks_to_show[:10]:  # Показываем первые 10
                 task_id = task['id']
                 task_name = task.get('name', 'Без названия')[:50]
                 # КЭШ: контрагент с фоновой подгрузкой (точечное ускорение)
@@ -2328,18 +2402,30 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             pass
                     asyncio.create_task(_bg_resolve_cp(task_id, task))
 
-                # Определяем и нормализуем статус
-                raw_status = task.get('status', {}) or {}
-                raw_status_id = raw_status.get('id')
-                status_name = raw_status.get('name')
+                # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
                 status_id = None
-                if isinstance(raw_status_id, int):
-                    status_id = raw_status_id
-                elif isinstance(raw_status_id, str):
-                    try:
-                        status_id = int(str(raw_status_id).split(':')[-1])
-                    except Exception:
-                        status_id = None
+                status_name = None
+                try:
+                    with db_manager.get_db() as db:
+                        task_cache = db_manager._manager.get_task_cache(db, task_id)
+                        if task_cache and task_cache.status_id:
+                            status_id = task_cache.status_id
+                            status_name = task_cache.status_name
+                except Exception:
+                    pass
+                
+                # Если статус из кеша недоступен, используем статус из API
+                if status_id is None:
+                    raw_status = task.get('status', {}) or {}
+                    raw_status_id = raw_status.get('id')
+                    status_name = raw_status.get('name')
+                    if isinstance(raw_status_id, int):
+                        status_id = raw_status_id
+                    elif isinstance(raw_status_id, str):
+                        try:
+                            status_id = int(str(raw_status_id).split(':')[-1])
+                        except Exception:
+                            status_id = None
 
                 # В списке новых заявок по умолчанию показываем «Новая», т.к. уже отфильтровано
                 status_display_name = status_name or status_labels(
@@ -3469,13 +3555,16 @@ async def _finalize_executor_comment(message_or_callback, state: FSMContext, ski
                     
                     # Очищаем кэш для каждого исполнителя
                     for exec in executors:
-                        # Очищаем кэш списка задач
-                        cache.delete(f"new_tasks:{exec.telegram_id}")
-                        cache.delete(f"new_tasks_request:{exec.telegram_id}:result")
-                        cache.delete(f"new_tasks_request:{exec.telegram_id}:time")
+                        # Очищаем кэш списка задач (TTLCache использует pop или del)
+                        cache.pop(f"new_tasks:{exec.telegram_id}", None)
+                        cache.pop(f"new_tasks_request:{exec.telegram_id}:result", None)
+                        cache.pop(f"new_tasks_request:{exec.telegram_id}:time", None)
                     
-                    # Очищаем кэш API запросов для всех статусов (они могут содержать эту задачу)
-                    cache.clear_pattern("api_tasks:")
+                    # Очищаем кэш API запросов для всех статусов (TTLCache не поддерживает clear_pattern, очищаем вручную)
+                    # Собираем все ключи, которые начинаются с "api_tasks:"
+                    keys_to_remove = [key for key in cache._store.keys() if isinstance(key, str) and key.startswith("api_tasks:")]
+                    for key in keys_to_remove:
+                        cache.pop(key, None)
                     
                     logger.info(f"✅ Cleared cache for all executors after task {task_id} completion")
                 except Exception as cache_clear_err:
