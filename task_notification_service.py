@@ -15,6 +15,8 @@ from config import (
     PLANFIX_SE_TEMPLATES,
     PLANFIX_IT_TAG,
     PLANFIX_SE_TAG,
+    SUPPORT_CONTACT_GROUP_ID,
+    SUPPORT_CONTACT_TEMPLATE_ID,
 )
 
 logger = logging.getLogger(__name__)
@@ -327,7 +329,9 @@ class TaskNotificationService:
                     ExecutorProfile.profile_status == "активен"
                 ).all()
             
-            notified_count = 0
+            # Собираем всех подходящих исполнителей для автоматического назначения
+            matching_executors = []
+            assignee_contact_ids = []
             
             for executor in executors:
                 # Применяем те же фильтры, что и в show_new_tasks
@@ -405,29 +409,106 @@ class TaskNotificationService:
                             )
                             continue
                 
-                # Все фильтры пройдены - отправляем уведомление
+                # Все фильтры пройдены - добавляем исполнителя в список для назначения
+                matching_executors.append(executor)
+                
+                # Получаем или создаем planfix_contact_id для исполнителя
+                planfix_contact_id = None
+                if executor.planfix_contact_id:
+                    try:
+                        if isinstance(executor.planfix_contact_id, str):
+                            if ':' in executor.planfix_contact_id:
+                                planfix_contact_id = int(executor.planfix_contact_id.split(':')[-1])
+                            else:
+                                planfix_contact_id = int(executor.planfix_contact_id)
+                        else:
+                            planfix_contact_id = int(executor.planfix_contact_id)
+                        logger.debug(f"Using existing Planfix contact {planfix_contact_id} for executor {executor.telegram_id}")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Invalid planfix_contact_id for executor {executor.telegram_id}: {e}")
+                
+                # Если контакта нет, создаем его
+                if not planfix_contact_id:
+                    try:
+                        logger.info(f"Creating Planfix contact for executor {executor.telegram_id} (contact not found)")
+                        # Разделяем ФИО на части
+                        name_parts = executor.full_name.strip().split()
+                        if len(name_parts) >= 2:
+                            name = " ".join(name_parts[1:])
+                            lastname = name_parts[0]
+                        else:
+                            name = executor.full_name
+                            lastname = executor.full_name
+                        
+                        # Создаем контакт в группе "Поддержка"
+                        contact_response = None
+                        try:
+                            contact_response = await planfix_client.create_contact(
+                                name=name,
+                                lastname=lastname,
+                                phone=executor.phone_number,
+                                email=executor.email,
+                                group_id=SUPPORT_CONTACT_GROUP_ID,
+                                template_id=SUPPORT_CONTACT_TEMPLATE_ID
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to create contact in support group for executor {executor.telegram_id}: {e}")
+                            contact_response = None
+                        
+                        if contact_response and contact_response.get('result') == 'success':
+                            contact_id = contact_response.get('id') or contact_response.get('contact', {}).get('id')
+                            if contact_id:
+                                planfix_contact_id = int(str(contact_id).split(':')[-1]) if isinstance(contact_id, str) and ':' in contact_id else int(contact_id)
+                                
+                                # Сохраняем contact_id в профиль исполнителя
+                                from services.db_service import db_manager
+                                await db_manager.update_executor_profile(
+                                    executor.telegram_id,
+                                    planfix_contact_id=str(planfix_contact_id),
+                                    planfix_user_id=str(planfix_contact_id)
+                                )
+                                logger.info(f"Created and saved Planfix contact {planfix_contact_id} for executor {executor.telegram_id}")
+                        else:
+                            logger.warning(f"Failed to create Planfix contact for executor {executor.telegram_id}: {contact_response}")
+                    except Exception as e:
+                        logger.error(f"Error creating Planfix contact for executor {executor.telegram_id}: {e}", exc_info=True)
+                
+                # Добавляем contact_id в список для назначения
+                if planfix_contact_id:
+                    assignee_contact_ids.append(planfix_contact_id)
+                    logger.debug(f"Added executor {executor.telegram_id} (contact_id={planfix_contact_id}) to assignment list")
+            
+            # Автоматически назначаем всех подходящих исполнителей в Planfix
+            if assignee_contact_ids:
+                try:
+                    logger.info(f"Auto-assigning {len(assignee_contact_ids)} executor(s) to task {task_id}")
+                    update_response = await planfix_client.update_task(
+                        task_id,
+                        assignee_contacts=assignee_contact_ids
+                    )
+                    
+                    if update_response and update_response.get('result') == 'success':
+                        logger.info(f"✅ Successfully assigned {len(assignee_contact_ids)} executor(s) to task {task_id}")
+                    else:
+                        logger.warning(f"Failed to assign executors to task {task_id}: {update_response}")
+                except Exception as assign_err:
+                    logger.error(f"Error assigning executors to task {task_id}: {assign_err}", exc_info=True)
+            
+            # Отправляем уведомления всем подходящим исполнителям (без кнопки "Принять")
+            notified_count = 0
+            for executor in matching_executors:
                 try:
                     message = (
                         f"🆕 Новая заявка #{task_id}\n\n"
                         f"📝 {task_name}\n"
                         f"🏪 Ресторан: {counterparty_name}\n"
                         f"📊 Статус: Новая\n\n"
-                        f"Примите задачу в работу, если она вам подходит."
-                    )
-                    
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="✅ Принять в работу",
-                                callback_data=f"accept:{task_id}"
-                            )]
-                        ]
+                        f"Вы автоматически назначены исполнителем. Начните работу над задачей."
                     )
                     
                     await self.bot.send_message(
                         executor.telegram_id,
-                        message,
-                        reply_markup=keyboard
+                        message
                     )
                     
                     notified_count += 1
@@ -440,8 +521,8 @@ class TaskNotificationService:
                     )
             
             logger.info(
-                f"✅ Notified {notified_count} executor(s) about new task {task_id} "
-                f"(total executors checked: {len(executors)})"
+                f"✅ Auto-assigned and notified {notified_count} executor(s) about new task {task_id} "
+                f"(total executors checked: {len(executors)}, matching: {len(matching_executors)})"
             )
             
         except Exception as e:

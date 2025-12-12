@@ -64,14 +64,13 @@ def get_skip_or_done_keyboard():
 
 def get_task_actions_keyboard(task_id: int, is_new: bool = False, is_waiting: bool = False, is_paused: bool = False):
     buttons = []
-    if is_new:
-        buttons.append([InlineKeyboardButton(text="✅ Принять в работу", callback_data=f"accept:{task_id}")])
-    else:
-        buttons.append([InlineKeyboardButton(text="💬 Написать комментарий", callback_data=f"comment:{task_id}")])
-        # Если задача в ожидании информации или на паузе — показываем «Возобновить»
-        if is_waiting or is_paused:
-            buttons.append([InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"resume:{task_id}")])
-        buttons.append([InlineKeyboardButton(text="✅ Завершить", callback_data=f"close:{task_id}")])
+    # Убрали кнопку "Принять в работу" - все исполнители назначаются автоматически
+    # Для новых задач показываем только комментарии и завершение
+    buttons.append([InlineKeyboardButton(text="💬 Написать комментарий", callback_data=f"comment:{task_id}")])
+    # Если задача в ожидании информации или на паузе — показываем «Возобновить»
+    if is_waiting or is_paused:
+        buttons.append([InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"resume:{task_id}")])
+    buttons.append([InlineKeyboardButton(text="✅ Завершить", callback_data=f"close:{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

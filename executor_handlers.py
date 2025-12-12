@@ -2783,11 +2783,34 @@ async def show_task_details(message: Message, state: FSMContext):
             pass
         
         # Проверяем, назначена ли задача
+        # Исполнители назначаются автоматически через assignee_contacts (contact:ID)
         assignees = task.get('assignees', {}).get('users', [])
-        is_assigned = any(
-            _local_pf_id_to_int(a.get('id')) == int(executor.planfix_user_id)
-            for a in assignees
-        ) if is_executor and executor.planfix_user_id else False
+        is_assigned = False
+        if is_executor:
+            # Проверяем по planfix_user_id (если есть)
+            if executor.planfix_user_id:
+                try:
+                    executor_user_id = int(executor.planfix_user_id)
+                    is_assigned = any(
+                        _local_pf_id_to_int(a.get('id')) == executor_user_id
+                        for a in assignees
+                    )
+                except (ValueError, TypeError):
+                    pass
+            
+            # Также проверяем по planfix_contact_id (так как назначаем через assignee_contacts)
+            if not is_assigned and executor.planfix_contact_id:
+                try:
+                    executor_contact_id = int(str(executor.planfix_contact_id).split(':')[-1])
+                    # В Planfix контакты могут отображаться как "contact:ID" или просто как число
+                    is_assigned = any(
+                        str(a.get('id', '')).endswith(f':{executor_contact_id}') or
+                        str(a.get('id', '')).endswith(f'contact:{executor_contact_id}') or
+                        _local_pf_id_to_int(a.get('id')) == executor_contact_id
+                        for a in assignees
+                    )
+                except (ValueError, TypeError):
+                    pass
 
         has_any_assignee = bool(assignees)
 
@@ -2804,8 +2827,8 @@ async def show_task_details(message: Message, state: FSMContext):
             except Exception:
                 accepted_by_executor = False
 
-        # Логика отображения кнопок: кнопку «Принять в работу» показываем строго при статусе «Новая»,
-        # независимо от назначений в Planfix. Остальные действия доступны только после принятия.
+        # Логика отображения кнопок: все назначенные исполнители автоматически получают доступ к действиям
+        # (исполнители назначаются автоматически при создании задачи)
         is_new = is_status(status_id, StatusKey.NEW)
         is_waiting = is_status(status_id, StatusKey.INFO_SENT)
         status_name_text = (status_name or "").strip().lower()
@@ -2847,12 +2870,16 @@ async def show_task_details(message: Message, state: FSMContext):
         if is_executor:
             await state.update_data(current_task_id=task_id)
             await state.set_state(ExecutorTaskManagement.viewing_task)
-            if accepted_by_executor:
+            # Если исполнитель назначен в Planfix (автоматически при создании задачи), показываем действия
+            if is_assigned or has_any_assignee:
                 reply_kb = get_task_actions_keyboard(task_id, is_new=False, is_waiting=is_waiting, is_paused=is_paused)
-            elif is_new:
-                reply_kb = get_task_actions_keyboard(task_id, is_new=True, is_waiting=is_waiting, is_paused=is_paused)
             else:
-                message_text += "\n\n🔒 Действия недоступны до принятия задачи через бот.\nСтатус задачи не 'Новая', поэтому кнопка принятия не отображается."
+                # Если исполнитель не назначен, возможно задача была создана до внедрения автоматического назначения
+                # Показываем действия для новых задач (обратная совместимость)
+                if is_new:
+                    reply_kb = get_task_actions_keyboard(task_id, is_new=False, is_waiting=is_waiting, is_paused=is_paused)
+                else:
+                    message_text += "\n\n⚠️ Вы не назначены исполнителем этой задачи."
         else:
             await state.clear()
 
@@ -3347,22 +3374,38 @@ async def add_comment(callback_query: CallbackQuery, state: FSMContext):
 # ОБРАБОТКА ПРИКРЕПЛЕНИЯ ФАЙЛОВ К КОММЕНТАРИЯМ
 # ============================================================================
 
-@router.message(ExecutorTaskManagement.attaching_file, F.content_type == ContentType.PHOTO)
-async def process_executor_comment_photo(message: Message, state: FSMContext):
-    """Обработка фото для комментария исполнителя."""
+@router.message(ExecutorTaskManagement.attaching_file, F.content_type.in_({ContentType.PHOTO, ContentType.VIDEO, ContentType.VIDEO_NOTE}))
+async def process_executor_comment_media(message: Message, state: FSMContext):
+    """Обработка фото/видео для комментария исполнителя."""
     user_data = await state.get_data()
     task_id = user_data.get('current_task_id')
     
     executor = await db_manager.get_executor_profile(message.from_user.id)
     
     try:
-        # Скачиваем фото
-        file_id = message.photo[-1].file_id
+        # Определяем тип медиа и получаем file_id
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = "photo"
+            default_filename = "photo.jpg"
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = "video"
+            default_filename = message.video.file_name or f"video_{file_id}.mp4"
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            media_type = "video_note"
+            default_filename = "video_note.mp4"
+        else:
+            await message.answer("❌ Не удалось определить тип медиа файла.")
+            return
+        
+        # Скачиваем медиа
         tg_file = await message.bot.get_file(file_id)
         file_bytes = await message.bot.download_file(tg_file.file_path)
         
-        # Загружаем фото в Planfix
-        upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+        # Загружаем медиа в Planfix
+        upload_response = await planfix_client.upload_file(file_bytes, filename=default_filename)
         planfix_file_id = None
         
         if upload_response and upload_response.get('result') == 'success':
@@ -3396,20 +3439,21 @@ async def process_executor_comment_photo(message: Message, state: FSMContext):
             await state.update_data(comment_files=comment_files)
             
             files_count = len(comment_files)
+            media_name = "фото" if media_type == "photo" else "видео"
             await message.answer(
-                f"📷 Фото прикреплено ({files_count} шт.). Можете добавить ещё фото или нажмите 'Пропустить' для отправки комментария.",
+                f"📷 {media_name.capitalize()} прикреплено ({files_count} шт.). Можете добавить ещё файлы или нажмите 'Пропустить' для отправки комментария.",
                 reply_markup=get_skip_or_done_keyboard()
             )
         else:
             await message.answer(
-                "⚠️ Ошибка при загрузке фото. Попробуйте ещё раз или нажмите 'Пропустить'.",
+                "⚠️ Ошибка при загрузке медиа файла. Попробуйте ещё раз или нажмите 'Пропустить'.",
                 reply_markup=get_skip_or_done_keyboard()
             )
             
     except Exception as e:
-        logger.error(f"Error uploading photo for executor comment: {e}", exc_info=True)
+        logger.error(f"Error uploading media for executor comment: {e}", exc_info=True)
         await message.answer(
-            "⚠️ Ошибка при загрузке фото. Попробуйте ещё раз или нажмите 'Пропустить'.",
+            "⚠️ Ошибка при загрузке медиа файла. Попробуйте ещё раз или нажмите 'Пропустить'.",
             reply_markup=get_skip_or_done_keyboard()
         )
 
@@ -3660,7 +3704,7 @@ async def process_executor_comment(message: Message, state: FSMContext):
             # Сохраняем текст комментария и переходим к прикреплению файла
             await state.update_data(comment_text=comment_text, comment_files=[])
             await message.answer(
-                "📷 Прикрепите фото (если нужно) или нажмите 'Пропустить':",
+                "📷 Прикрепите фото или видео (если нужно) или нажмите 'Пропустить':",
                 reply_markup=get_skip_or_done_keyboard()
             )
             await state.set_state(ExecutorTaskManagement.attaching_file)
@@ -3675,7 +3719,7 @@ async def process_executor_comment(message: Message, state: FSMContext):
             # Сохраняем текст комментария и переходим к прикреплению файла
             await state.update_data(comment_text=comment_text, comment_files=[])
             await message.answer(
-                "📷 Прикрепите фото (если нужно) или нажмите 'Пропустить':",
+                "📷 Прикрепите фото или видео (если нужно) или нажмите 'Пропустить':",
                 reply_markup=get_skip_or_done_keyboard()
             )
             await state.set_state(ExecutorTaskManagement.attaching_file)

@@ -744,33 +744,50 @@ async def choose_template(callback_query: CallbackQuery, state: FSMContext):
     await state.set_state(TicketCreation.entering_description)
 
 
-@router.message(TicketCreation.entering_description, F.content_type == ContentType.PHOTO)
-async def enter_description_with_photo(message: Message, state: FSMContext):
-    """Обработка описания проблемы с фото в одном сообщении."""
-    # Получаем текст из подписи к фото или из предыдущего сообщения
+@router.message(TicketCreation.entering_description, F.content_type.in_({ContentType.PHOTO, ContentType.VIDEO, ContentType.VIDEO_NOTE}))
+async def enter_description_with_media(message: Message, state: FSMContext):
+    """Обработка описания проблемы с фото/видео в одном сообщении."""
+    # Получаем текст из подписи к медиа или из предыдущего сообщения
     description = message.caption or ""
     description = description.strip()
     
+    # Определяем тип медиа и получаем file_id
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        media_type = "photo"
+        default_filename = "photo.jpg"
+    elif message.video:
+        file_id = message.video.file_id
+        media_type = "video"
+        # Используем оригинальное имя файла, если есть, иначе дефолтное
+        default_filename = message.video.file_name or f"video_{file_id}.mp4"
+    elif message.video_note:
+        file_id = message.video_note.file_id
+        media_type = "video_note"
+        default_filename = "video_note.mp4"
+    else:
+        await message.answer("❌ Не удалось определить тип медиа файла.")
+        return
+    
     # Если описания нет в подписи, просим ввести его отдельно
     if not description or len(description) < 10:
-        # Сохраняем file_id фото для последующей обработки
-        file_id = message.photo[-1].file_id
-        await state.update_data(has_photo=True, photo_file_id=file_id)
+        # Сохраняем file_id медиа для последующей обработки
+        await state.update_data(has_media=True, media_file_id=file_id, media_type=media_type)
+        media_name = "Фото" if media_type == "photo" else "Видео"
         await message.answer(
-            "📷 <b>Фото получено!</b>\n\n"
+            f"📷 <b>{media_name} получено!</b>\n\n"
             "Теперь опишите проблему подробно (минимум 10 символов):"
         )
         # Остаемся в том же состоянии, чтобы получить описание
         return
     
-    # Если описание есть в подписи, обрабатываем фото и создаем заявку
+    # Если описание есть в подписи, обрабатываем медиа и создаем заявку
     try:
-        file_id = message.photo[-1].file_id
         tg_file = await message.bot.get_file(file_id)
         file_bytes = await message.bot.download_file(tg_file.file_path)
         
         # Загружаем в Planfix
-        upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+        upload_response = await planfix_client.upload_file(file_bytes, filename=default_filename)
         
         if upload_response and upload_response.get('result') == 'success':
             planfix_file_id = upload_response.get('id')
@@ -789,32 +806,33 @@ async def enter_description_with_photo(message: Message, state: FSMContext):
             
             if planfix_file_id:
                 await state.update_data(description=description, files=[planfix_file_id])
-                logger.info(f"Uploaded file {planfix_file_id} to Planfix with description")
+                media_name = "фото" if media_type == "photo" else "видео"
+                logger.info(f"Uploaded {media_name} {planfix_file_id} to Planfix with description")
             else:
                 await state.update_data(description=description)
-                await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+                await message.answer("⚠️ Не удалось загрузить медиа файл, но заявка будет создана без него.")
         else:
             logger.warning("Failed to upload file to Planfix")
             await state.update_data(description=description)
-            await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+            await message.answer("⚠️ Не удалось загрузить медиа файл, но заявка будет создана без него.")
         
         # Создаем заявку сразу
         await finalize_create_task(message, state, message.from_user.id)
         
     except Exception as e:
-        logger.error(f"Error uploading photo: {e}", exc_info=True)
+        logger.error(f"Error uploading media: {e}", exc_info=True)
         await state.update_data(description=description)
-        await message.answer("⚠️ Ошибка при загрузке фото, но заявка будет создана без него.")
+        await message.answer("⚠️ Ошибка при загрузке медиа файла, но заявка будет создана без него.")
         await finalize_create_task(message, state, message.from_user.id)
 
 
 @router.message(TicketCreation.entering_description)
 async def enter_description(message: Message, state: FSMContext):
     """Обработка описания проблемы (только текст)."""
-    # Проверяем, есть ли уже фото в состоянии (если пользователь отправил фото без подписи)
+    # Проверяем, есть ли уже медиа в состоянии (если пользователь отправил медиа без подписи)
     state_data = await state.get_data()
-    if state_data.get('has_photo') and state_data.get('photo_file_id'):
-        # Пользователь отправил фото без подписи, а теперь отправляет описание
+    if state_data.get('has_media') and state_data.get('media_file_id'):
+        # Пользователь отправил медиа без подписи, а теперь отправляет описание
         description = message.text.strip()
         
         if len(description) < 10:
@@ -824,14 +842,26 @@ async def enter_description(message: Message, state: FSMContext):
             )
             return
         
-        # Обрабатываем фото из предыдущего сообщения
-        photo_file_id = state_data['photo_file_id']
+        # Обрабатываем медиа из предыдущего сообщения
+        media_file_id = state_data['media_file_id']
+        media_type = state_data.get('media_type', 'photo')
+        
+        # Определяем имя файла по умолчанию
+        if media_type == "photo":
+            default_filename = "photo.jpg"
+        elif media_type == "video":
+            default_filename = f"video_{media_file_id}.mp4"
+        elif media_type == "video_note":
+            default_filename = "video_note.mp4"
+        else:
+            default_filename = "file"
+        
         try:
-            tg_file = await message.bot.get_file(photo_file_id)
+            tg_file = await message.bot.get_file(media_file_id)
             file_bytes = await message.bot.download_file(tg_file.file_path)
             
             # Загружаем в Planfix
-            upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+            upload_response = await planfix_client.upload_file(file_bytes, filename=default_filename)
             
             if upload_response and upload_response.get('result') == 'success':
                 planfix_file_id = upload_response.get('id')
@@ -848,23 +878,24 @@ async def enter_description(message: Message, state: FSMContext):
                     planfix_file_id = None
                 
                 if planfix_file_id:
-                    await state.update_data(description=description, files=[planfix_file_id], has_photo=None, photo_file_id=None)
-                    logger.info(f"Uploaded file {planfix_file_id} to Planfix with description")
+                    await state.update_data(description=description, files=[planfix_file_id], has_media=None, media_file_id=None, media_type=None)
+                    media_name = "фото" if media_type == "photo" else "видео"
+                    logger.info(f"Uploaded {media_name} {planfix_file_id} to Planfix with description")
                 else:
-                    await state.update_data(description=description, has_photo=None, photo_file_id=None)
-                    await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+                    await state.update_data(description=description, has_media=None, media_file_id=None, media_type=None)
+                    await message.answer("⚠️ Не удалось загрузить медиа файл, но заявка будет создана без него.")
             else:
-                await state.update_data(description=description, has_photo=None, photo_file_id=None)
-                await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+                await state.update_data(description=description, has_media=None, media_file_id=None, media_type=None)
+                await message.answer("⚠️ Не удалось загрузить медиа файл, но заявка будет создана без него.")
             
             # Создаем заявку сразу
             await finalize_create_task(message, state, message.from_user.id)
             return
             
         except Exception as e:
-            logger.error(f"Error uploading photo: {e}", exc_info=True)
-            await state.update_data(description=description, has_photo=None, photo_file_id=None)
-            await message.answer("⚠️ Ошибка при загрузке фото, но заявка будет создана без него.")
+            logger.error(f"Error uploading media: {e}", exc_info=True)
+            await state.update_data(description=description, has_media=None, media_file_id=None, media_type=None)
+            await message.answer("⚠️ Ошибка при загрузке медиа файла, но заявка будет создана без него.")
             await finalize_create_task(message, state, message.from_user.id)
             return
     
@@ -880,8 +911,8 @@ async def enter_description(message: Message, state: FSMContext):
     
     await state.update_data(description=description)
     await message.answer(
-        "📷 <b>Прикрепите фото проблемы</b> (если есть)\n\n"
-        "Или нажмите кнопку <b>«Пропустить»</b> для продолжения без фото:",
+        "📷 <b>Прикрепите фото или видео проблемы</b> (если есть)\n\n"
+        "Или нажмите кнопку <b>«Пропустить»</b> для продолжения без файлов:",
         reply_markup=get_skip_or_done_keyboard(),
         parse_mode="HTML"
     )
@@ -895,16 +926,32 @@ async def skip_file(callback_query: CallbackQuery, state: FSMContext):
     await finalize_create_task(callback_query.message, state, callback_query.from_user.id)
 
 
-@router.message(TicketCreation.attaching_photo, F.content_type == ContentType.PHOTO)
-async def receive_photo(message: Message, state: FSMContext):
-    """Обработка прикрепленного фото."""
+@router.message(TicketCreation.attaching_photo, F.content_type.in_({ContentType.PHOTO, ContentType.VIDEO, ContentType.VIDEO_NOTE}))
+async def receive_media(message: Message, state: FSMContext):
+    """Обработка прикрепленного фото/видео."""
     try:
-        file_id = message.photo[-1].file_id
+        # Определяем тип медиа и получаем file_id
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = "photo"
+            default_filename = "photo.jpg"
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = "video"
+            default_filename = message.video.file_name or f"video_{file_id}.mp4"
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            media_type = "video_note"
+            default_filename = "video_note.mp4"
+        else:
+            await message.answer("❌ Не удалось определить тип медиа файла.")
+            return
+        
         tg_file = await message.bot.get_file(file_id)
         file_bytes = await message.bot.download_file(tg_file.file_path)
         
         # Загружаем в Planfix
-        upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+        upload_response = await planfix_client.upload_file(file_bytes, filename=default_filename)
         
         if upload_response and upload_response.get('result') == 'success':
             planfix_file_id = upload_response.get('id')
@@ -922,16 +969,17 @@ async def receive_photo(message: Message, state: FSMContext):
             
             if planfix_file_id:
                 await state.update_data(files=[planfix_file_id])
-                logger.info(f"Uploaded file {planfix_file_id} to Planfix")
+                media_name = "фото" if media_type == "photo" else "видео"
+                logger.info(f"Uploaded {media_name} {planfix_file_id} to Planfix")
         else:
             logger.warning("Failed to upload file to Planfix")
-            await message.answer("⚠️ Не удалось загрузить фото, но заявка будет создана без него.")
+            await message.answer("⚠️ Не удалось загрузить медиа файл, но заявка будет создана без него.")
         
         await finalize_create_task(message, state, message.from_user.id)
         
     except Exception as e:
-        logger.error(f"Error uploading photo: {e}", exc_info=True)
-        await message.answer("⚠️ Ошибка при загрузке фото, но заявка будет создана без него.")
+        logger.error(f"Error uploading media: {e}", exc_info=True)
+        await message.answer("⚠️ Ошибка при загрузке медиа файла, но заявка будет создана без него.")
         await finalize_create_task(message, state, message.from_user.id)
 
 
@@ -1911,7 +1959,7 @@ async def comment_text(message: Message, state: FSMContext):
     """Обработка текста комментария."""
     await state.update_data(comment_text=message.text)
     await message.answer(
-        "📷 Прикрепите фото (если нужно) или напишите 'Готово':",
+        "📷 Прикрепите фото или видео (если нужно) или напишите 'Готово':",
         reply_markup=get_skip_or_done_keyboard()
     )
     await state.set_state(CommentFlow.waiting_for_file)
@@ -1934,24 +1982,41 @@ async def comment_skip_file(callback_query: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-@router.message(CommentFlow.waiting_for_file, F.content_type == ContentType.PHOTO)
-async def comment_with_photo(message: Message, state: FSMContext):
-    """Отправка комментария с фото."""
+@router.message(CommentFlow.waiting_for_file, F.content_type.in_({ContentType.PHOTO, ContentType.VIDEO, ContentType.VIDEO_NOTE}))
+async def comment_with_media(message: Message, state: FSMContext):
+    """Отправка комментария с фото/видео."""
     data = await state.get_data()
     
     try:
-        file_id = message.photo[-1].file_id
+        # Определяем тип медиа и получаем file_id
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = "photo"
+            default_filename = "photo.jpg"
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = "video"
+            default_filename = message.video.file_name or f"video_{file_id}.mp4"
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            media_type = "video_note"
+            default_filename = "video_note.mp4"
+        else:
+            await message.answer("❌ Не удалось определить тип медиа файла.")
+            await state.clear()
+            return
+        
         tg_file = await message.bot.get_file(file_id)
         file_bytes = await message.bot.download_file(tg_file.file_path)
         
-        upload_response = await planfix_client.upload_file(file_bytes, filename="photo.jpg")
+        upload_response = await planfix_client.upload_file(file_bytes, filename=default_filename)
         planfix_file_id = upload_response.get('id') if upload_response and upload_response.get('result') == 'success' else None
         
         await submit_comment(message, data.get("task_id"), data.get("comment_text"), planfix_file_id)
         
     except Exception as e:
-        logger.error(f"Error uploading photo for comment: {e}", exc_info=True)
-        await message.answer("⚠️ Ошибка при загрузке фото, комментарий будет отправлен без него.")
+        logger.error(f"Error uploading media for comment: {e}", exc_info=True)
+        await message.answer("⚠️ Ошибка при загрузке медиа файла, комментарий будет отправлен без него.")
         await submit_comment(message, data.get("task_id"), data.get("comment_text"), None)
     
     await state.clear()
