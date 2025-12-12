@@ -1627,12 +1627,6 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                                     logger.error(f"Failed to add files via comment: {comment_err}", exc_info=True)
                     except Exception as files_err:
                         logger.error(f"❌ Error adding files to task {task_id}: {files_err}", exc_info=True)
-        # #region agent log
-        try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_TOTAL","location":"user_handlers.py:1629","message":"finalize_create_task completed","data":{"user_id":user_id,"total_duration_ms":(time.time()-perf_start)*1000},"timestamp":int(time.time()*1000)})+"\n")
-        except: pass
-        # #endregion
                 
                 # Сохраняем привязку task_id -> telegram_id для последующих уведомлений
                 # Сохраняем оба ID для совместимости с разными форматами
