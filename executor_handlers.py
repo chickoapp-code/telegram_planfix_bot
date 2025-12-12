@@ -1667,16 +1667,6 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     api_cache_key = f"api_tasks:{status_id}:{offset}:{page_size}:{date_from}"
                     tasks_response = None
                     # Для первой страницы не используем кэш, чтобы видеть новые задачи
-                    if offset == 0:
-                        logger.debug(f"Skipping cache for first page to see new tasks")
-                        tasks_response = await planfix_client.get_task_list(
-                            filters=filters,
-                            fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
-                            page_size=page_size,
-                            offset=offset,
-                            result_order=[{"field": "dateTime", "direction": "Desc"}]
-                        )
-                    else:
                     # ВАЖНО: Не используем кэш для API запросов, чтобы всегда получать актуальные статусы задач
                     # Это гарантирует, что завершенные задачи не будут показываться в списке
                     # Кэш может содержать устаревшие данные о статусах задач
