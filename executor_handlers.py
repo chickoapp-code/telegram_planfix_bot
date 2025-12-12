@@ -3649,30 +3649,30 @@ async def _finalize_executor_comment(message_or_callback, state: FSMContext, ski
                     files=files
                 )
                 
-                    # Очищаем кэш для всех исполнителей после завершения задачи
-                    # Это гарантирует, что завершенная задача не будет показываться в списке "Новые заявки"
-                    try:
-                        # Получаем всех активных исполнителей
-                        with db_manager.get_db() as db:
-                            from database import ExecutorProfile
-                            executors = db.query(ExecutorProfile).filter(
-                                ExecutorProfile.profile_status == "активен"
-                            ).all()
-                        
-                        # Очищаем кэш для каждого исполнителя
-                        for exec in executors:
-                            # Очищаем кэш списка задач
-                            cache.delete(f"new_tasks:{exec.telegram_id}")
-                            cache.delete(f"new_tasks_request:{exec.telegram_id}:result")
-                            cache.delete(f"new_tasks_request:{exec.telegram_id}:time")
-                        
-                        # Очищаем кэш API запросов для всех статусов (они могут содержать эту задачу)
-                        cache.clear_pattern("api_tasks:")
-                        
-                        logger.info(f"✅ Cleared cache for all executors after task {task_id} completion")
-                    except Exception as cache_clear_err:
-                        logger.warning(f"Error clearing cache after task completion: {cache_clear_err}")
-                        # Не прерываем выполнение из-за ошибки очистки кэша
+                # Очищаем кэш для всех исполнителей после завершения задачи
+                # Это гарантирует, что завершенная задача не будет показываться в списке "Новые заявки"
+                try:
+                    # Получаем всех активных исполнителей
+                    with db_manager.get_db() as db:
+                        from database import ExecutorProfile
+                        executors = db.query(ExecutorProfile).filter(
+                            ExecutorProfile.profile_status == "активен"
+                        ).all()
+                    
+                    # Очищаем кэш для каждого исполнителя
+                    for exec in executors:
+                        # Очищаем кэш списка задач
+                        cache.delete(f"new_tasks:{exec.telegram_id}")
+                        cache.delete(f"new_tasks_request:{exec.telegram_id}:result")
+                        cache.delete(f"new_tasks_request:{exec.telegram_id}:time")
+                    
+                    # Очищаем кэш API запросов для всех статусов (они могут содержать эту задачу)
+                    cache.clear_pattern("api_tasks:")
+                    
+                    logger.info(f"✅ Cleared cache for all executors after task {task_id} completion")
+                except Exception as cache_clear_err:
+                    logger.warning(f"Error clearing cache after task completion: {cache_clear_err}")
+                    # Не прерываем выполнение из-за ошибки очистки кэша
                 
             except Exception as e:
                 logger.error(f"Error adding comment to task {task_id} (close action): {e}", exc_info=True)
