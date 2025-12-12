@@ -4,6 +4,7 @@
 """
 
 import logging
+import json
 from typing import List, Set, Dict
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -494,6 +495,21 @@ class TaskNotificationService:
                 logger.warning(f"❌ No matching executors found for task {task_id}. Check filters (template, tags, restaurants, direction).")
                 return
 
+            # Логируем информацию о найденных исполнителях
+            logger.info(
+                f"Found {len(matching_executors)} matching executor(s) for task {task_id}: "
+                f"contacts={len(assignee_contact_ids)}, users={len(assignee_user_ids)}"
+            )
+            
+            # Если есть подходящие исполнители, но нет ни contact_id, ни user_id — это проблема
+            if matching_executors and not assignee_contact_ids and not assignee_user_ids:
+                logger.error(
+                    f"❌ CRITICAL: Found {len(matching_executors)} matching executor(s) for task {task_id}, "
+                    f"but none have planfix_contact_id or planfix_user_id! "
+                    f"Cannot assign executors. Executor IDs: {[e.telegram_id for e in matching_executors]}"
+                )
+                # Продолжаем, чтобы отправить уведомления, но назначение не произойдет
+
             # Автоматически назначаем всех подходящих исполнителей в Planfix и меняем статус на "В работе"
             if assignee_contact_ids or assignee_user_ids:
                 try:
@@ -525,7 +541,12 @@ class TaskNotificationService:
                     )
                     
                     if update_response and update_response.get('result') == 'success':
-                        logger.info(f"✅ Successfully assigned {len(assignee_contact_ids)} executor(s) to task {task_id} and set status to IN_PROGRESS")
+                        total_assigned = len(assignee_contact_ids) + len(assignee_user_ids)
+                        logger.info(
+                            f"✅ Successfully assigned {total_assigned} executor(s) to task {task_id} "
+                            f"(contacts={len(assignee_contact_ids)}, users={len(assignee_user_ids)}) "
+                            f"and set status to IN_PROGRESS"
+                        )
                         
                         # Создаем записи о назначении в локальной БД, чтобы "📋 Мои задачи" показывал принятые заявки
                         try:
@@ -553,7 +574,11 @@ class TaskNotificationService:
                         except Exception as db_err:
                             logger.warning(f"Failed to create TaskAssignment records for task {task_id}: {db_err}")
                     else:
-                        logger.warning(f"Failed to assign executors to task {task_id}: {update_response}")
+                        logger.error(
+                            f"❌ Failed to assign executors to task {task_id}. "
+                            f"Response: {json.dumps(update_response, ensure_ascii=False) if update_response else 'No response'}. "
+                            f"Attempted to assign: contacts={assignee_contact_ids}, users={assignee_user_ids}"
+                        )
                 except Exception as assign_err:
                     logger.error(f"Error assigning executors to task {task_id}: {assign_err}", exc_info=True)
             
