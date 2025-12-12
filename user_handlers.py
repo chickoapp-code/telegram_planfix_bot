@@ -168,7 +168,7 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
 
         # ОПТИМИЗАЦИЯ: Получаем задачи из TaskCache вместо API запросов
         cached_tasks = await db_manager.run(
-            db_manager.get_user_tasks_from_cache,
+            db_manager._manager.get_user_tasks_from_cache,
             user_id,
             limit * 2  # Берем больше для фильтрации
         )
@@ -1677,7 +1677,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                                     template_id_cache = int(template_id_cache)
                             
                             await db_manager.run(
-                                db_manager.create_or_update_task_cache,
+                                db_manager._manager.create_or_update_task_cache,
                                 task_id=task_id_general,
                                 task_id_internal=task_id_internal,
                                 name=task_obj_cache.get('name', ''),
@@ -1746,7 +1746,7 @@ async def finalize_create_task(message: Message, state: FSMContext, user_id: int
                                     template_id_cache = int(template_id_cache)
                             
                             await db_manager.run(
-                                db_manager.create_or_update_task_cache,
+                                db_manager._manager.create_or_update_task_cache,
                                 task_id=task_id_general,
                                 task_id_internal=task_id_internal,
                                 name=task_obj_cache.get('name', ''),
