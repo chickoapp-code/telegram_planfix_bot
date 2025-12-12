@@ -158,37 +158,104 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
         
         logger.debug(f"Found {len(logs or [])} logs for user {user_id} with action 'create_task'")
 
-        # Собираем уникальные ID задач (int)
+        # ОПТИМИЗАЦИЯ: Предзагружаем маппинг internal_id -> generalId один раз
+        import json as json_module
+        id_mapping = {}  # {internal_id: generalId, task_id: generalId}
         bot_task_ids = []
+        
         for log in logs or []:
             try:
                 details = log.details or {}
                 if not details:
                     logger.debug(f"Log {log.id} has no details")
                     continue
-                    
-                # Пробуем получить task_id из разных полей
-                # ВАЖНО: Используем task_id_general в приоритете, так как API Planfix требует generalId, а не internal ID
-                task_id_val = details.get('task_id_general') or details.get('task_id') or details.get('task_id_internal')
-                if task_id_val is not None:
-                    # Нормализуем ID (может быть строкой вида "task:123" или числом)
-                    if isinstance(task_id_val, str):
-                        if ':' in task_id_val:
-                            task_id_val = task_id_val.split(':')[-1]
-                        try:
-                            task_id_int = int(task_id_val)
-                            bot_task_ids.append(task_id_int)
-                            logger.debug(f"Added task_id {task_id_int} from log {log.id}")
-                        except (ValueError, TypeError):
-                            logger.warning(f"Could not convert task_id_val '{task_id_val}' to int from log {log.id}")
-                    elif isinstance(task_id_val, (int, float)):
-                        bot_task_ids.append(int(task_id_val))
-                        logger.debug(f"Added task_id {int(task_id_val)} from log {log.id}")
+                
+                # Парсим details если это строка
+                if isinstance(details, str):
+                    try:
+                        details = json_module.loads(details)
+                    except:
+                        continue
+                
+                # ВАЖНО: Используем ТОЛЬКО task_id_general, так как API Planfix требует generalId
+                # Если task_id_general нет, пропускаем эту задачу (старые записи без generalId)
+                task_id_general = details.get('task_id_general')
+                if not task_id_general:
+                    # Пробуем получить из task_id, если он есть (для старых записей)
+                    task_id_val = details.get('task_id')
+                    if task_id_val:
+                        # Нормализуем ID
+                        if isinstance(task_id_val, str):
+                            if ':' in task_id_val:
+                                task_id_val = task_id_val.split(':')[-1]
+                            try:
+                                task_id_general = int(task_id_val)
+                            except (ValueError, TypeError):
+                                continue
+                        elif isinstance(task_id_val, (int, float)):
+                            task_id_general = int(task_id_val)
+                        else:
+                            continue
+                    else:
+                        continue  # Пропускаем задачи без generalId
+                
+                # Нормализуем generalId
+                if isinstance(task_id_general, str):
+                    if ':' in task_id_general:
+                        task_id_general = task_id_general.split(':')[-1]
+                    try:
+                        task_id_general = int(task_id_general)
+                    except (ValueError, TypeError):
+                        continue
+                elif isinstance(task_id_general, (int, float)):
+                    task_id_general = int(task_id_general)
+                else:
+                    continue
+                
+                bot_task_ids.append(task_id_general)
+                
+                # Сохраняем маппинг для internal_id и task_id (если они есть и отличаются)
+                task_id_internal = details.get('task_id_internal')
+                if task_id_internal:
+                    try:
+                        if isinstance(task_id_internal, str):
+                            if ':' in task_id_internal:
+                                task_id_internal = int(task_id_internal.split(':')[-1])
+                            else:
+                                task_id_internal = int(task_id_internal)
+                        elif isinstance(task_id_internal, (int, float)):
+                            task_id_internal = int(task_id_internal)
+                        else:
+                            task_id_internal = None
+                        
+                        if task_id_internal and task_id_internal != task_id_general:
+                            id_mapping[task_id_internal] = task_id_general
+                    except:
+                        pass
+                
+                task_id_old = details.get('task_id')
+                if task_id_old and task_id_old != task_id_general:
+                    try:
+                        if isinstance(task_id_old, str):
+                            if ':' in task_id_old:
+                                task_id_old = int(task_id_old.split(':')[-1])
+                            else:
+                                task_id_old = int(task_id_old)
+                        elif isinstance(task_id_old, (int, float)):
+                            task_id_old = int(task_id_old)
+                        else:
+                            task_id_old = None
+                        
+                        if task_id_old and task_id_old != task_id_general:
+                            id_mapping[task_id_old] = task_id_general
+                    except:
+                        pass
+                        
             except Exception as e:
                 logger.warning(f"Error processing log {log.id if hasattr(log, 'id') else 'unknown'}: {e}")
                 continue
 
-        logger.info(f"Collected {len(bot_task_ids)} unique task IDs for user {user_id}")
+        logger.info(f"Collected {len(bot_task_ids)} unique task IDs (generalId) for user {user_id}, mapping size: {len(id_mapping)}")
         
         if not bot_task_ids:
             logger.info(f"No task IDs found for user {user_id} in BotLog")
@@ -196,6 +263,16 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
 
         # Сортируем по убыванию и применяем лимит
         bot_task_ids = sorted(set(bot_task_ids), reverse=True)[:limit]
+        
+        # #region agent log
+        import time
+        perf_start = time.time()
+        log_path = r"b:\telegram_planfix_bot\telegram_planfix_bot\.cursor\debug.log"
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_GET_TASKS","location":"user_handlers.py:199","message":"get_user_tasks starting parallel fetch","data":{"user_id":user_id,"task_count":len(bot_task_ids),"mapping_size":len(id_mapping)},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
 
         # Запрашиваем каждую задачу параллельно (быстрее, чем фильтр)
         tasks = []
@@ -207,36 +284,32 @@ async def get_user_tasks(user_id: int, limit: int = 10, only_active: bool = Fals
                 if tr and tr.get('result') == 'success' and tr.get('task'):
                     return tr['task']
             except Exception as e:
-                # Если получили 400 Bad Request, возможно это internal ID, а не generalId
-                # Пробуем найти generalId в BotLog для этого ID
+                # Если получили 400 Bad Request, проверяем маппинг (быстро, без запроса к БД)
                 if "400" in str(e) or "Bad Request" in str(e):
-                    logger.warning(f"Got 400 Bad Request for task {tid}, trying to find generalId in BotLog")
-                    try:
-                        # Ищем в BotLog запись с task_id_internal = tid или task_id = tid
-                        with db_manager.get_db() as db:
-                            from database import BotLog
-                            import json as json_module
-                            logs = db.query(BotLog).filter(
-                                BotLog.action == 'create_task'
-                            ).all()
-                            for log in logs:
-                                if log.details:
-                                    details = log.details if isinstance(log.details, dict) else json_module.loads(log.details) if isinstance(log.details, str) else {}
-                                    if details.get('task_id_internal') == tid or details.get('task_id') == tid:
-                                        general_id = details.get('task_id_general') or details.get('task_id')
-                                        if general_id and general_id != tid:
-                                            logger.info(f"Found generalId {general_id} for task {tid}, retrying")
-                                            tr = await planfix_client.get_task_by_id(general_id, fields="id,name,status,dateOfLastUpdate,counterparty")
-                                            if tr and tr.get('result') == 'success' and tr.get('task'):
-                                                return tr['task']
-                    except Exception as retry_err:
-                        logger.debug(f"Failed to retry with generalId for task {tid}: {retry_err}")
+                    if tid in id_mapping:
+                        general_id = id_mapping[tid]
+                        logger.info(f"Found generalId {general_id} for task {tid} from mapping, retrying")
+                        try:
+                            tr = await planfix_client.get_task_by_id(general_id, fields="id,name,status,dateOfLastUpdate,counterparty")
+                            if tr and tr.get('result') == 'success' and tr.get('task'):
+                                return tr['task']
+                        except:
+                            pass
                 logger.debug(f"Failed to fetch task {tid}: {e}")
             return None
         
         # Запрашиваем все задачи параллельно
-        task_results = await asyncio.gather(*[fetch_task(tid) for tid in bot_task_ids], return_exceptions=False)
-        tasks = [t for t in task_results if t is not None]
+        # ОПТИМИЗАЦИЯ: Используем return_exceptions=True, чтобы не останавливаться на ошибках отдельных задач
+        task_results = await asyncio.gather(*[fetch_task(tid) for tid in bot_task_ids], return_exceptions=True)
+        tasks = [t for t in task_results if t is not None and not isinstance(t, Exception)]
+        
+        # #region agent log
+        perf_duration = (time.time() - perf_start) * 1000
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"perf","hypothesisId":"PERF_GET_TASKS","location":"user_handlers.py:238","message":"get_user_tasks parallel fetch completed","data":{"user_id":user_id,"task_count":len(bot_task_ids),"successful":len(tasks),"duration_ms":perf_duration},"timestamp":int(time.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         
         # Обновляем статусы в tracked_tasks для ускорения синхронизации
         # (статусы уже актуальные, так как получаем их напрямую из Planfix)
