@@ -558,6 +558,476 @@ async def admin_executors_menu(message: Message, state: FSMContext):
     )
 
 
+@router.message(AdminManagement.main_menu, F.text == "🔄 Синхронизировать задачи из Planfix")
+async def admin_sync_tasks(message: Message, state: FSMContext):
+    """Синхронизация задач из Planfix в БД бота."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для доступа к админ-командам.")
+        return
+    
+    await message.answer("⏳ Начинаю синхронизацию задач из Planfix...")
+    
+    try:
+        from planfix_client import planfix_client
+        from services.status_registry import StatusKey, collect_status_ids, require_status_id
+        from datetime import datetime
+        from db_manager import DBManager
+        from database import TaskCache
+        
+        sync_db_manager = DBManager()
+        
+        # Получаем статусы "Новая" и "В работе"
+        working_status_ids = collect_status_ids(
+            (StatusKey.NEW, StatusKey.IN_PROGRESS),
+            required=False,
+        )
+        if not working_status_ids:
+            try:
+                working_status_ids = [
+                    require_status_id(StatusKey.NEW),
+                    require_status_id(StatusKey.IN_PROGRESS)
+                ]
+                working_status_ids = [sid for sid in working_status_ids if sid is not None]
+            except Exception:
+                working_status_ids = []
+        
+        if not working_status_ids:
+            await message.answer("❌ Не удалось получить ID статусов. Проверьте настройки.")
+            return
+        
+        total_synced = 0
+        total_updated = 0
+        total_created = 0
+        total_errors = 0
+        
+        # Получаем все задачи для каждого статуса с пагинацией
+        for status_id in working_status_ids:
+            if status_id is None:
+                continue
+            
+            logger.info(f"🔄 Syncing tasks with status {status_id}")
+            await message.answer(f"🔄 Синхронизация задач со статусом {status_id}...")
+            
+            filters = [
+                {
+                    "type": 10,  # Task status
+                    "operator": "equal",
+                    "value": status_id
+                }
+            ]
+            
+            page_size = 100
+            offset = 0
+            max_pages = 20  # Максимум 20 страниц (2000 задач) для каждого статуса
+            
+            while offset < max_pages * page_size:
+                try:
+                    response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,description,status,project,counterparty,dateTime,dateOfLastUpdate,template,assignees",
+                        page_size=page_size,
+                        offset=offset
+                    )
+                    
+                    if response and response.get('result') == 'success':
+                        tasks_list = response.get('tasks', [])
+                        if not tasks_list:
+                            break
+                        
+                        logger.info(f"📥 Processing {len(tasks_list)} tasks with status {status_id} (offset={offset})")
+                        
+                        with sync_db_manager.get_db() as db:
+                            for task in tasks_list:
+                                try:
+                                    task_id = task.get('id')
+                                    if not task_id:
+                                        continue
+                                    
+                                    # Нормализуем task_id
+                                    if isinstance(task_id, str) and ':' in task_id:
+                                        task_id = int(task_id.split(':')[-1])
+                                    else:
+                                        task_id = int(task_id)
+                                    
+                                    # Извлекаем данные задачи
+                                    task_name = task.get('name', '')
+                                    status_obj = task.get('status', {})
+                                    status_id_task = status_obj.get('id') if isinstance(status_obj, dict) else None
+                                    status_name = status_obj.get('name') if isinstance(status_obj, dict) else None
+                                    
+                                    # Нормализуем status_id
+                                    if isinstance(status_id_task, str) and ':' in str(status_id_task):
+                                        status_id_task = int(str(status_id_task).split(':')[-1])
+                                    elif isinstance(status_id_task, int):
+                                        pass
+                                    else:
+                                        status_id_task = None
+                                    
+                                    counterparty_obj = task.get('counterparty', {})
+                                    counterparty_id = counterparty_obj.get('id') if isinstance(counterparty_obj, dict) else None
+                                    if counterparty_id:
+                                        if isinstance(counterparty_id, str) and ':' in str(counterparty_id):
+                                            counterparty_id = int(str(counterparty_id).split(':')[-1])
+                                        else:
+                                            counterparty_id = int(counterparty_id)
+                                    
+                                    project_obj = task.get('project', {})
+                                    project_id = project_obj.get('id') if isinstance(project_obj, dict) else None
+                                    if project_id:
+                                        if isinstance(project_id, str) and ':' in str(project_id):
+                                            project_id = int(str(project_id).split(':')[-1])
+                                        else:
+                                            project_id = int(project_id)
+                                    
+                                    template_obj = task.get('template', {})
+                                    template_id = template_obj.get('id') if isinstance(template_obj, dict) else None
+                                    if template_id:
+                                        if isinstance(template_id, str) and ':' in str(template_id):
+                                            template_id = int(str(template_id).split(':')[-1])
+                                        else:
+                                            template_id = int(template_id)
+                                    
+                                    # Проверяем, создана ли задача через бота (по имени или описанию)
+                                    created_by_bot = False
+                                    if task_name:
+                                        task_name_lower = task_name.lower()
+                                        if any(keyword in task_name_lower for keyword in ['заявка', 'задача', 'обращение']):
+                                            created_by_bot = True
+                                    
+                                    # Дата последнего обновления
+                                    date_of_last_update = None
+                                    date_str = task.get('dateOfLastUpdate')
+                                    if date_str:
+                                        try:
+                                            date_of_last_update = datetime.fromisoformat(date_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                                        except:
+                                            pass
+                                    
+                                    # Проверяем, существует ли задача в кэше
+                                    existing_task = db.query(TaskCache).filter(TaskCache.task_id == task_id).first()
+                                    
+                                    if existing_task:
+                                        # Обновляем существующую задачу
+                                        existing_task.name = task_name
+                                        existing_task.status_id = status_id_task
+                                        existing_task.status_name = status_name
+                                        existing_task.counterparty_id = counterparty_id
+                                        existing_task.project_id = project_id
+                                        existing_task.template_id = template_id
+                                        existing_task.created_by_bot = created_by_bot
+                                        existing_task.date_of_last_update = date_of_last_update
+                                        existing_task.updated_at = datetime.now()
+                                        total_updated += 1
+                                    else:
+                                        # Создаем новую задачу
+                                        new_task = TaskCache(
+                                            task_id=task_id,
+                                            name=task_name,
+                                            status_id=status_id_task,
+                                            status_name=status_name,
+                                            counterparty_id=counterparty_id,
+                                            project_id=project_id,
+                                            template_id=template_id,
+                                            created_by_bot=created_by_bot,
+                                            date_of_last_update=date_of_last_update
+                                        )
+                                        db.add(new_task)
+                                        total_created += 1
+                                    
+                                    total_synced += 1
+                                    
+                                except Exception as task_err:
+                                    logger.error(f"Error processing task {task.get('id')}: {task_err}", exc_info=True)
+                                    total_errors += 1
+                            
+                            db.commit()
+                        
+                        # Если получили меньше задач, чем page_size, значит это последняя страница
+                        if len(tasks_list) < page_size:
+                            break
+                    else:
+                        logger.warning(f"Failed to fetch tasks with status {status_id} at offset {offset}: {response}")
+                        break
+                    
+                    offset += page_size
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching tasks with status {status_id} at offset {offset}: {e}", exc_info=True)
+                    total_errors += 1
+                    break
+        
+        result_message = (
+            f"✅ <b>Синхронизация завершена</b>\n\n"
+            f"📊 Всего обработано: {total_synced}\n"
+            f"➕ Создано новых: {total_created}\n"
+            f"🔄 Обновлено: {total_updated}\n"
+            f"❌ Ошибок: {total_errors}"
+        )
+        
+        await message.answer(result_message, parse_mode="HTML")
+        logger.info(f"✅ Task sync completed: {total_synced} total, {total_created} created, {total_updated} updated, {total_errors} errors")
+        
+    except Exception as e:
+        logger.error(f"Error syncing tasks: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка при синхронизации: {e}")
+
+
+@router.message(AdminManagement.main_menu, F.text == "📥 Загрузить задачи без шаблона (10 дней)")
+async def admin_sync_tasks_without_template(message: Message, state: FSMContext):
+    """Синхронизация задач без шаблона за последние 10 дней, у которых есть исполнитель из бота."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для доступа к админ-командам.")
+        return
+    
+    await message.answer("⏳ Начинаю загрузку задач без шаблона за последние 10 дней...")
+    
+    try:
+        from planfix_client import planfix_client
+        from datetime import datetime, timedelta
+        from db_manager import DBManager
+        from database import TaskCache, ExecutorProfile
+        
+        sync_db_manager = DBManager()
+        
+        # Получаем список всех исполнителей из бота с их Planfix ID
+        with sync_db_manager.get_db() as db:
+            executors = db.query(ExecutorProfile).filter(
+                ExecutorProfile.profile_status == "активен"
+            ).all()
+        
+        # Создаем словарь для быстрого поиска: planfix_id -> telegram_id
+        executor_planfix_ids = set()
+        for executor in executors:
+            if executor.planfix_user_id:
+                try:
+                    planfix_id = int(str(executor.planfix_user_id).split(':')[-1])
+                    executor_planfix_ids.add(('user', planfix_id))
+                except (ValueError, TypeError):
+                    pass
+            if executor.planfix_contact_id:
+                try:
+                    planfix_id = int(str(executor.planfix_contact_id).split(':')[-1])
+                    executor_planfix_ids.add(('contact', planfix_id))
+                except (ValueError, TypeError):
+                    pass
+        
+        logger.info(f"📋 Found {len(executor_planfix_ids)} executor Planfix IDs to check")
+        
+        if not executor_planfix_ids:
+            await message.answer("❌ Не найдено активных исполнителей с Planfix ID.")
+            return
+        
+        # Дата 10 дней назад
+        date_from = (datetime.now() - timedelta(days=10)).strftime("%d-%m-%Y")
+        
+        # Фильтр по дате создания (последние 10 дней)
+        filters = [
+            {
+                "type": 13,  # Start date filter
+                "operator": "gt",  # greater than
+                "value": {
+                    "dateType": "otherDate",
+                    "dateValue": date_from
+                }
+            }
+        ]
+        
+        total_synced = 0
+        total_updated = 0
+        total_created = 0
+        total_errors = 0
+        total_with_executor = 0
+        
+        logger.info(f"🔄 Loading tasks created after {date_from}")
+        await message.answer(f"🔄 Загрузка задач, созданных после {date_from}...")
+        
+        page_size = 100
+        offset = 0
+        max_pages = 50  # Максимум 50 страниц (5000 задач)
+        
+        while offset < max_pages * page_size:
+            try:
+                response = await planfix_client.get_task_list(
+                    filters=filters,
+                    fields="id,name,description,status,project,counterparty,dateTime,dateOfLastUpdate,template,assignees",
+                    page_size=page_size,
+                    offset=offset,
+                    result_order=[{"field": "dateTime", "direction": "Desc"}]
+                )
+                
+                if response and response.get('result') == 'success':
+                    tasks_list = response.get('tasks', [])
+                    if not tasks_list:
+                        break
+                    
+                    logger.info(f"📥 Processing {len(tasks_list)} tasks (offset={offset})")
+                    
+                    with sync_db_manager.get_db() as db:
+                        for task in tasks_list:
+                            try:
+                                task_id = task.get('id')
+                                if not task_id:
+                                    continue
+                                
+                                # Нормализуем task_id
+                                if isinstance(task_id, str) and ':' in task_id:
+                                    task_id = int(task_id.split(':')[-1])
+                                else:
+                                    task_id = int(task_id)
+                                
+                                # Проверяем, есть ли шаблон
+                                template_obj = task.get('template', {})
+                                template_id = template_obj.get('id') if isinstance(template_obj, dict) else None
+                                
+                                # Пропускаем задачи с шаблоном
+                                if template_id:
+                                    continue
+                                
+                                # Проверяем, есть ли среди назначенных исполнителей те, кто в боте
+                                assignees = task.get('assignees', {}) or {}
+                                assignee_users = assignees.get('users', []) or []
+                                assignee_contacts = assignees.get('contacts', []) or []
+                                all_assignees = assignee_users + assignee_contacts
+                                
+                                has_bot_executor = False
+                                for assignee in all_assignees:
+                                    if not isinstance(assignee, dict):
+                                        continue
+                                    
+                                    assignee_id = assignee.get('id', '')
+                                    if not assignee_id:
+                                        continue
+                                    
+                                    if isinstance(assignee_id, str):
+                                        if ':' in assignee_id:
+                                            assignee_type, assignee_num = assignee_id.split(':', 1)
+                                            try:
+                                                assignee_num_int = int(assignee_num)
+                                                if (assignee_type, assignee_num_int) in executor_planfix_ids:
+                                                    has_bot_executor = True
+                                                    break
+                                            except (ValueError, TypeError):
+                                                continue
+                                    elif isinstance(assignee_id, int):
+                                        if ('user', assignee_id) in executor_planfix_ids:
+                                            has_bot_executor = True
+                                            break
+                                
+                                # Пропускаем задачи без исполнителей из бота
+                                if not has_bot_executor:
+                                    continue
+                                
+                                total_with_executor += 1
+                                
+                                # Извлекаем данные задачи
+                                task_name = task.get('name', '')
+                                status_obj = task.get('status', {})
+                                status_id_task = status_obj.get('id') if isinstance(status_obj, dict) else None
+                                status_name = status_obj.get('name') if isinstance(status_obj, dict) else None
+                                
+                                # Нормализуем status_id
+                                if isinstance(status_id_task, str) and ':' in str(status_id_task):
+                                    status_id_task = int(str(status_id_task).split(':')[-1])
+                                elif isinstance(status_id_task, int):
+                                    pass
+                                else:
+                                    status_id_task = None
+                                
+                                counterparty_obj = task.get('counterparty', {})
+                                counterparty_id = counterparty_obj.get('id') if isinstance(counterparty_obj, dict) else None
+                                if counterparty_id:
+                                    if isinstance(counterparty_id, str) and ':' in str(counterparty_id):
+                                        counterparty_id = int(str(counterparty_id).split(':')[-1])
+                                    else:
+                                        counterparty_id = int(counterparty_id)
+                                
+                                project_obj = task.get('project', {})
+                                project_id = project_obj.get('id') if isinstance(project_obj, dict) else None
+                                if project_id:
+                                    if isinstance(project_id, str) and ':' in str(project_id):
+                                        project_id = int(str(project_id).split(':')[-1])
+                                    else:
+                                        project_id = int(project_id)
+                                
+                                # Дата последнего обновления
+                                date_of_last_update = None
+                                date_str = task.get('dateOfLastUpdate')
+                                if date_str:
+                                    try:
+                                        date_of_last_update = datetime.fromisoformat(date_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                                    except:
+                                        pass
+                                
+                                # Проверяем, существует ли задача в кэше
+                                existing_task = db.query(TaskCache).filter(TaskCache.task_id == task_id).first()
+                                
+                                if existing_task:
+                                    # Обновляем существующую задачу
+                                    existing_task.name = task_name
+                                    existing_task.status_id = status_id_task
+                                    existing_task.status_name = status_name
+                                    existing_task.counterparty_id = counterparty_id
+                                    existing_task.project_id = project_id
+                                    existing_task.template_id = None  # Без шаблона
+                                    existing_task.created_by_bot = False  # Не создана через бота
+                                    existing_task.date_of_last_update = date_of_last_update
+                                    existing_task.updated_at = datetime.now()
+                                    total_updated += 1
+                                else:
+                                    # Создаем новую задачу
+                                    new_task = TaskCache(
+                                        task_id=task_id,
+                                        name=task_name,
+                                        status_id=status_id_task,
+                                        status_name=status_name,
+                                        counterparty_id=counterparty_id,
+                                        project_id=project_id,
+                                        template_id=None,  # Без шаблона
+                                        created_by_bot=False,  # Не создана через бота
+                                        date_of_last_update=date_of_last_update
+                                    )
+                                    db.add(new_task)
+                                    total_created += 1
+                                
+                                total_synced += 1
+                                
+                            except Exception as task_err:
+                                logger.error(f"Error processing task {task.get('id')}: {task_err}", exc_info=True)
+                                total_errors += 1
+                        
+                        db.commit()
+                    
+                    # Если получили меньше задач, чем page_size, значит это последняя страница
+                    if len(tasks_list) < page_size:
+                        break
+                else:
+                    logger.warning(f"Failed to fetch tasks at offset {offset}: {response}")
+                    break
+                
+                offset += page_size
+                
+            except Exception as e:
+                logger.error(f"Error fetching tasks at offset {offset}: {e}", exc_info=True)
+                total_errors += 1
+                break
+        
+        result_message = (
+            f"✅ <b>Загрузка завершена</b>\n\n"
+            f"📊 Всего обработано: {total_synced}\n"
+            f"👷 С исполнителем из бота: {total_with_executor}\n"
+            f"➕ Создано новых: {total_created}\n"
+            f"🔄 Обновлено: {total_updated}\n"
+            f"❌ Ошибок: {total_errors}"
+        )
+        
+        await message.answer(result_message, parse_mode="HTML")
+        logger.info(f"✅ Task sync (without template) completed: {total_synced} total, {total_with_executor} with executor, {total_created} created, {total_updated} updated, {total_errors} errors")
+        
+    except Exception as e:
+        logger.error(f"Error syncing tasks without template: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка при загрузке: {e}")
+
+
 @router.message(AdminManagement.main_menu, F.text == "📊 Статистика")
 async def admin_statistics(message: Message, state: FSMContext):
     """Показывает статистику."""

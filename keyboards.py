@@ -202,7 +202,9 @@ def get_admin_main_menu_keyboard():
     buttons = [
         [KeyboardButton(text="👥 Управление пользователями")],
         [KeyboardButton(text="👷 Управление исполнителями")],
-        [KeyboardButton(text="📊 Статистика")]
+        [KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="🔄 Синхронизировать задачи из Planfix")],
+        [KeyboardButton(text="📥 Загрузить задачи без шаблона (10 дней)")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
