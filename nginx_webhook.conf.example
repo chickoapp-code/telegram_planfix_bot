@@ -1,0 +1,88 @@
+# Конфигурация nginx для webhook endpoint с Basic Authentication
+# 
+# Инструкция по установке:
+# 1. Создайте файл с паролями:
+#    sudo htpasswd -c /etc/nginx/.htpasswd webhook_user
+#    (введите пароль при запросе)
+#
+# 2. Скопируйте этот файл в sites-available:
+#    sudo cp nginx_webhook.conf.example /etc/nginx/sites-available/telegram-bot-webhook
+#
+# 3. Создайте симлинк в sites-enabled:
+#    sudo ln -s /etc/nginx/sites-available/telegram-bot-webhook /etc/nginx/sites-enabled/
+#
+# 4. Проверьте конфигурацию:
+#    sudo nginx -t
+#
+# 5. Перезагрузите nginx:
+#    sudo systemctl reload nginx
+#
+# 6. Настройте в Planfix:
+#    URL: http://your-server-ip/planfix/webhook
+#    Username: webhook_user
+#    Password: (пароль, который вы указали)
+
+server {
+    listen 80;
+    # Если у вас есть домен, раскомментируйте и укажите:
+    # server_name your-domain.com;
+    
+    # Если используете HTTPS, раскомментируйте:
+    # listen 443 ssl;
+    # ssl_certificate /path/to/your/cert.pem;
+    # ssl_certificate_key /path/to/your/key.pem;
+    
+    # Логирование (опционально, можно использовать общие логи)
+    access_log /var/log/nginx/webhook_access.log;
+    error_log /var/log/nginx/webhook_error.log;
+    
+    # Webhook endpoint с Basic Authentication
+    location /planfix/webhook {
+        # Basic Authentication
+        auth_basic "Planfix Webhook Authentication";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        
+        # Проксирование на локальный webhook сервер
+        # ВАЖНО: Убедитесь, что порт совпадает с WEBHOOK_PORT в .env файле
+        proxy_pass http://127.0.0.1:8080/planfix/webhook;
+        
+        # Заголовки для проксирования
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # КРИТИЧЕСКИ ВАЖНО: передаем оригинальный Authorization header
+        # чтобы приложение могло проверить Basic Auth (если нужно)
+        proxy_set_header Authorization $http_authorization;
+        
+        # Таймауты (webhook может обрабатываться долго)
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # Отключаем буферизацию для webhook (данные в реальном времени)
+        proxy_buffering off;
+        
+        # Размер тела запроса (уже настроен в основном nginx.conf как 10M)
+        # client_max_body_size 10M;  # Раскомментируйте, если нужно переопределить
+    }
+    
+    # Health check endpoint (без аутентификации, для мониторинга)
+    location /health {
+        proxy_pass http://127.0.0.1:8080/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # Быстрый ответ для health check
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+    
+    # Блокируем все остальные запросы к этому серверу
+    location / {
+        return 404;
+    }
+}
