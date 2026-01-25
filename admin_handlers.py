@@ -232,6 +232,219 @@ async def cmd_admin_tasks(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка при получении заявок.")
 
 
+@router.message(Command("admin_executor_tasks"))
+async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
+    """Команда для просмотра заявок исполнителя: /admin_executor_tasks <executor_id>"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для доступа к админ-командам.")
+        return
+    
+    try:
+        # Парсим аргументы команды
+        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+        
+        if not args:
+            await message.answer(
+                "📋 <b>Просмотр заявок исполнителя</b>\n\n"
+                "Использование: <code>/admin_executor_tasks &lt;executor_id&gt;</code>\n\n"
+                "Пример: <code>/admin_executor_tasks 123456789</code>\n\n"
+                "Или используйте меню: /admin → 👷 Управление исполнителями → выберите исполнителя → 📋 Заявки исполнителя",
+                parse_mode="HTML"
+            )
+            return
+        
+        executor_id = int(args[0])
+        executor = await db_manager.get_executor_profile(executor_id)
+        
+        if not executor:
+            await message.answer(f"❌ Исполнитель с ID {executor_id} не найден.")
+            return
+        
+        # Получаем planfix_user_id или planfix_contact_id исполнителя
+        executor_planfix_id = None
+        executor_planfix_id_type = None
+        
+        if executor.planfix_user_id:
+            try:
+                executor_planfix_id = int(str(executor.planfix_user_id).split(':')[-1])
+                executor_planfix_id_type = "user"
+            except (ValueError, TypeError):
+                pass
+        
+        if not executor_planfix_id and executor.planfix_contact_id:
+            try:
+                executor_planfix_id = int(str(executor.planfix_contact_id).split(':')[-1])
+                executor_planfix_id_type = "contact"
+            except (ValueError, TypeError):
+                pass
+        
+        tasks = []
+        
+        if executor_planfix_id and executor_planfix_id_type:
+            # Получаем задачи через Planfix API по фильтру назначенных исполнителей
+            from planfix_client import planfix_client
+            from services.status_registry import StatusKey, collect_status_ids, require_status_id
+            
+            # Получаем статусы "Новая" и "В работе"
+            working_status_ids = collect_status_ids(
+                (StatusKey.NEW, StatusKey.IN_PROGRESS),
+                required=False,
+            )
+            if not working_status_ids:
+                try:
+                    working_status_ids = [
+                        require_status_id(StatusKey.NEW),
+                        require_status_id(StatusKey.IN_PROGRESS)
+                    ]
+                    working_status_ids = [sid for sid in working_status_ids if sid is not None]
+                except Exception:
+                    working_status_ids = []
+            
+            # Запрашиваем задачи для каждого статуса
+            for status_id in working_status_ids:
+                if status_id is None:
+                    continue
+                
+                filters = [
+                    {
+                        "type": 2,  # Task assignee
+                        "operator": "equal",
+                        "value": f"{executor_planfix_id_type}:{executor_planfix_id}"
+                    },
+                    {
+                        "type": 10,  # Task status
+                        "operator": "equal",
+                        "value": status_id
+                    }
+                ]
+                
+                try:
+                    response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
+                        pageSize=50
+                    )
+                    
+                    if response and response.get('result') == 'success':
+                        tasks_list = response.get('tasks', [])
+                        if tasks_list:
+                            tasks.extend(tasks_list)
+                except Exception as e:
+                    logger.error(f"Error fetching tasks for executor {executor_id}: {e}")
+            
+            # Убираем дубликаты
+            seen_task_ids = set()
+            unique_tasks = []
+            for task in tasks:
+                task_id = task.get('id')
+                if task_id and task_id not in seen_task_ids:
+                    seen_task_ids.add(task_id)
+                    unique_tasks.append(task)
+            tasks = unique_tasks
+        else:
+            # Если нет planfix_user_id, получаем задачи из TaskAssignment
+            from db_manager import DBManager
+            sync_db_manager = DBManager()
+            
+            with sync_db_manager.get_db() as db:
+                from database import TaskAssignment
+                assignments = db.query(TaskAssignment).filter(
+                    TaskAssignment.executor_telegram_id == executor_id,
+                    TaskAssignment.status == "active"
+                ).all()
+                
+                if assignments:
+                    # Получаем детали задач из Planfix API
+                    from planfix_client import planfix_client
+                    for assignment in assignments:
+                        try:
+                            task_response = await planfix_client.get_task_by_id(
+                                assignment.task_id,
+                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate"
+                            )
+                            if task_response and task_response.get('result') == 'success':
+                                task = task_response.get('task', {})
+                                if task:
+                                    tasks.append(task)
+                        except Exception as e:
+                            logger.debug(f"Error fetching task {assignment.task_id}: {e}")
+        
+        if not tasks:
+            executor_name = executor.full_name or f"ID: {executor_id}"
+            await message.answer(
+                f"📋 <b>Заявки исполнителя</b>\n\n"
+                f"👷 <b>{executor_name}</b> (ID: {executor_id})\n\n"
+                f"❌ У исполнителя нет назначенных заявок.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Формируем список заявок
+        executor_name = executor.full_name or f"ID: {executor_id}"
+        lines = [
+            f"📋 <b>Заявки исполнителя</b>\n",
+            f"👷 <b>{executor_name}</b> (ID: {executor_id})\n",
+            f"Всего заявок: {len(tasks)}\n",
+            "────────────────────\n"
+        ]
+        
+        # Показываем первые 20 заявок
+        for task in tasks[:20]:
+            task_id = task.get('id')
+            task_name = task.get('name', 'Без названия')[:50]
+            status_obj = task.get('status', {})
+            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
+            
+            # Получаем название ресторана (если есть)
+            counterparty_id = None
+            counterparty_obj = task.get('counterparty', {})
+            if isinstance(counterparty_obj, dict):
+                counterparty_id = counterparty_obj.get('id')
+            
+            restaurant_info = ""
+            if counterparty_id:
+                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            
+            lines.append(
+                f"📋 <b>#{task_id}</b> – {status_name}\n"
+                f"📝 {task_name}{restaurant_info}\n"
+                f"────────────────────"
+            )
+        
+        if len(tasks) > 20:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        
+        # Создаем клавиатуру с кнопками для просмотра деталей заявок
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        task_buttons = []
+        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
+            task_id = task.get('id')
+            task_name = task.get('name', f'Заявка #{task_id}')[:30]
+            task_buttons.append([
+                InlineKeyboardButton(
+                    text=f"#{task_id} - {task_name}",
+                    callback_data=f"admin_view_task:{task_id}"
+                )
+            ])
+        
+        task_buttons.append([
+            InlineKeyboardButton(text="👷 Профиль исполнителя", callback_data=f"admin_view_executor:{executor_id}")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
+        
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except ValueError:
+        await message.answer("❌ Неверный формат команды. Используйте: <code>/admin_executor_tasks &lt;executor_id&gt;</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in admin_executor_tasks command: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при получении заявок.")
+
+
 # ============================================================================
 # ГЛАВНОЕ МЕНЮ
 # ============================================================================
@@ -663,17 +876,243 @@ async def admin_view_task_details(callback_query: CallbackQuery, state: FSMConte
                     task_text += f"👤 <b>Создал:</b> {user.full_name or f'ID: {user.telegram_id}'}\n"
         
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад к заявкам", callback_data=f"admin_view_user_tasks:{task_cache.user_telegram_id if task_cache and task_cache.user_telegram_id else '0'}")]
-            ]
-        )
+        back_buttons = []
+        
+        # Определяем, откуда пришли (от пользователя или исполнителя)
+        if task_cache and task_cache.user_telegram_id:
+            back_buttons.append([
+                InlineKeyboardButton(text="◀️ Назад к заявкам пользователя", callback_data=f"admin_view_user_tasks:{task_cache.user_telegram_id}")
+            ])
+        
+        # Также проверяем, может быть это заявка исполнителя
+        if task_cache:
+            from db_manager import DBManager
+            sync_db_manager = DBManager()
+            with sync_db_manager.get_db() as db:
+                from database import TaskAssignment
+                assignment = db.query(TaskAssignment).filter(
+                    TaskAssignment.task_id == task_id,
+                    TaskAssignment.status == "active"
+                ).first()
+                if assignment:
+                    back_buttons.append([
+                        InlineKeyboardButton(text="◀️ Назад к заявкам исполнителя", callback_data=f"admin_view_executor_tasks:{assignment.executor_telegram_id}")
+                    ])
+        
+        if not back_buttons:
+            back_buttons.append([
+                InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back_to_main")
+            ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=back_buttons)
         
         await callback_query.message.answer(task_text, reply_markup=keyboard, parse_mode="HTML")
         await callback_query.answer()
     except Exception as e:
         logger.error(f"Error viewing task details: {e}", exc_info=True)
         await callback_query.answer("❌ Ошибка при загрузке заявки.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_view_executor_tasks:"))
+async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMContext):
+    """Показывает заявки выбранного исполнителя."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+    
+    try:
+        executor_id = int(callback_query.data.split(":")[1])
+        executor = await db_manager.get_executor_profile(executor_id)
+        
+        if not executor:
+            await callback_query.answer("❌ Исполнитель не найден.", show_alert=True)
+            return
+        
+        # Показываем индикатор загрузки
+        await callback_query.answer("⏳ Загрузка заявок...")
+        
+        # Получаем planfix_user_id или planfix_contact_id исполнителя
+        executor_planfix_id = None
+        executor_planfix_id_type = None
+        
+        if executor.planfix_user_id:
+            try:
+                executor_planfix_id = int(str(executor.planfix_user_id).split(':')[-1])
+                executor_planfix_id_type = "user"
+            except (ValueError, TypeError):
+                pass
+        
+        if not executor_planfix_id and executor.planfix_contact_id:
+            try:
+                executor_planfix_id = int(str(executor.planfix_contact_id).split(':')[-1])
+                executor_planfix_id_type = "contact"
+            except (ValueError, TypeError):
+                pass
+        
+        tasks = []
+        
+        if executor_planfix_id and executor_planfix_id_type:
+            # Получаем задачи через Planfix API по фильтру назначенных исполнителей
+            from planfix_client import planfix_client
+            from services.status_registry import StatusKey, collect_status_ids, require_status_id
+            
+            # Получаем статусы "Новая" и "В работе"
+            working_status_ids = collect_status_ids(
+                (StatusKey.NEW, StatusKey.IN_PROGRESS),
+                required=False,
+            )
+            if not working_status_ids:
+                try:
+                    working_status_ids = [
+                        require_status_id(StatusKey.NEW),
+                        require_status_id(StatusKey.IN_PROGRESS)
+                    ]
+                    working_status_ids = [sid for sid in working_status_ids if sid is not None]
+                except Exception:
+                    working_status_ids = []
+            
+            # Запрашиваем задачи для каждого статуса
+            for status_id in working_status_ids:
+                if status_id is None:
+                    continue
+                
+                filters = [
+                    {
+                        "type": 2,  # Task assignee
+                        "operator": "equal",
+                        "value": f"{executor_planfix_id_type}:{executor_planfix_id}"
+                    },
+                    {
+                        "type": 10,  # Task status
+                        "operator": "equal",
+                        "value": status_id
+                    }
+                ]
+                
+                try:
+                    response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
+                        pageSize=50
+                    )
+                    
+                    if response and response.get('result') == 'success':
+                        tasks_list = response.get('tasks', [])
+                        if tasks_list:
+                            tasks.extend(tasks_list)
+                except Exception as e:
+                    logger.error(f"Error fetching tasks for executor {executor_id}: {e}")
+            
+            # Убираем дубликаты
+            seen_task_ids = set()
+            unique_tasks = []
+            for task in tasks:
+                task_id = task.get('id')
+                if task_id and task_id not in seen_task_ids:
+                    seen_task_ids.add(task_id)
+                    unique_tasks.append(task)
+            tasks = unique_tasks
+        else:
+            # Если нет planfix_user_id, получаем задачи из TaskAssignment
+            from db_manager import DBManager
+            sync_db_manager = DBManager()
+            
+            with sync_db_manager.get_db() as db:
+                from database import TaskAssignment
+                assignments = db.query(TaskAssignment).filter(
+                    TaskAssignment.executor_telegram_id == executor_id,
+                    TaskAssignment.status == "active"
+                ).all()
+                
+                if assignments:
+                    # Получаем детали задач из Planfix API
+                    from planfix_client import planfix_client
+                    for assignment in assignments:
+                        try:
+                            task_response = await planfix_client.get_task_by_id(
+                                assignment.task_id,
+                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate"
+                            )
+                            if task_response and task_response.get('result') == 'success':
+                                task = task_response.get('task', {})
+                                if task:
+                                    tasks.append(task)
+                        except Exception as e:
+                            logger.debug(f"Error fetching task {assignment.task_id}: {e}")
+        
+        if not tasks:
+            executor_name = executor.full_name or f"ID: {executor_id}"
+            await callback_query.message.answer(
+                f"📋 <b>Заявки исполнителя</b>\n\n"
+                f"👷 <b>{executor_name}</b> (ID: {executor_id})\n\n"
+                f"❌ У исполнителя нет назначенных заявок.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Формируем список заявок
+        executor_name = executor.full_name or f"ID: {executor_id}"
+        lines = [
+            f"📋 <b>Заявки исполнителя</b>\n",
+            f"👷 <b>{executor_name}</b> (ID: {executor_id})\n",
+            f"Всего заявок: {len(tasks)}\n",
+            "────────────────────\n"
+        ]
+        
+        # Показываем первые 20 заявок
+        for task in tasks[:20]:
+            task_id = task.get('id')
+            task_name = task.get('name', 'Без названия')[:50]
+            status_obj = task.get('status', {})
+            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
+            
+            # Получаем название ресторана (если есть)
+            counterparty_id = None
+            counterparty_obj = task.get('counterparty', {})
+            if isinstance(counterparty_obj, dict):
+                counterparty_id = counterparty_obj.get('id')
+            
+            restaurant_info = ""
+            if counterparty_id:
+                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            
+            lines.append(
+                f"📋 <b>#{task_id}</b> – {status_name}\n"
+                f"📝 {task_name}{restaurant_info}\n"
+                f"────────────────────"
+            )
+        
+        if len(tasks) > 20:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        
+        # Создаем клавиатуру с кнопками для просмотра деталей заявок
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        task_buttons = []
+        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
+            task_id = task.get('id')
+            task_name = task.get('name', f'Заявка #{task_id}')[:30]
+            task_buttons.append([
+                InlineKeyboardButton(
+                    text=f"#{task_id} - {task_name}",
+                    callback_data=f"admin_view_task:{task_id}"
+                )
+            ])
+        
+        task_buttons.append([
+            InlineKeyboardButton(text="◀️ Назад к профилю", callback_data=f"admin_view_executor:{executor_id}")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
+        
+        await callback_query.message.answer(
+            "\n".join(lines),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Error viewing executor tasks: {e}", exc_info=True)
+        await callback_query.answer("❌ Ошибка при загрузке заявок.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin_view_executor:"))
