@@ -120,6 +120,118 @@ async def cmd_admin(message: Message, state: FSMContext):
     )
 
 
+@router.message(Command("admin_tasks"))
+async def cmd_admin_tasks(message: Message, state: FSMContext):
+    """Команда для просмотра заявок пользователя: /admin_tasks <user_id>"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав для доступа к админ-командам.")
+        return
+    
+    try:
+        # Парсим аргументы команды
+        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+        
+        if not args:
+            await message.answer(
+                "📋 <b>Просмотр заявок пользователя</b>\n\n"
+                "Использование: <code>/admin_tasks &lt;user_id&gt;</code>\n\n"
+                "Пример: <code>/admin_tasks 123456789</code>\n\n"
+                "Или используйте меню: /admin → 👥 Управление пользователями → выберите пользователя → 📋 Заявки пользователя",
+                parse_mode="HTML"
+            )
+            return
+        
+        user_id = int(args[0])
+        user = await db_manager.get_user_profile(user_id)
+        
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
+            return
+        
+        # Получаем заявки пользователя
+        from user_handlers import get_user_tasks
+        tasks = await get_user_tasks(user_id, limit=50, only_active=False)
+        
+        if tasks is None:
+            await message.answer("❌ Ошибка при получении заявок пользователя.")
+            return
+        
+        if not tasks:
+            user_name = user.full_name or f"ID: {user_id}"
+            await message.answer(
+                f"📋 <b>Заявки пользователя</b>\n\n"
+                f"👤 <b>{user_name}</b> (ID: {user_id})\n\n"
+                f"❌ У пользователя нет заявок.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Формируем список заявок
+        user_name = user.full_name or f"ID: {user_id}"
+        lines = [
+            f"📋 <b>Заявки пользователя</b>\n",
+            f"👤 <b>{user_name}</b> (ID: {user_id})\n",
+            f"Всего заявок: {len(tasks)}\n",
+            "────────────────────\n"
+        ]
+        
+        # Показываем первые 20 заявок
+        for task in tasks[:20]:
+            task_id = task.get('id')
+            task_name = task.get('name', 'Без названия')[:50]
+            status_obj = task.get('status', {})
+            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
+            
+            # Получаем название ресторана (если есть)
+            counterparty_id = None
+            counterparty_obj = task.get('counterparty', {})
+            if isinstance(counterparty_obj, dict):
+                counterparty_id = counterparty_obj.get('id')
+            
+            restaurant_info = ""
+            if counterparty_id:
+                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            
+            lines.append(
+                f"📋 <b>#{task_id}</b> – {status_name}\n"
+                f"📝 {task_name}{restaurant_info}\n"
+                f"────────────────────"
+            )
+        
+        if len(tasks) > 20:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        
+        # Создаем клавиатуру с кнопками для просмотра деталей заявок
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        task_buttons = []
+        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
+            task_id = task.get('id')
+            task_name = task.get('name', f'Заявка #{task_id}')[:30]
+            task_buttons.append([
+                InlineKeyboardButton(
+                    text=f"#{task_id} - {task_name}",
+                    callback_data=f"admin_view_task:{task_id}"
+                )
+            ])
+        
+        task_buttons.append([
+            InlineKeyboardButton(text="👤 Профиль пользователя", callback_data=f"admin_view_user:{user_id}")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
+        
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except ValueError:
+        await message.answer("❌ Неверный формат команды. Используйте: <code>/admin_tasks &lt;user_id&gt;</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in admin_tasks command: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при получении заявок.")
+
+
 # ============================================================================
 # ГЛАВНОЕ МЕНЮ
 # ============================================================================
@@ -374,6 +486,194 @@ async def admin_view_user(callback_query: CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error(f"Error viewing user: {e}", exc_info=True)
         await callback_query.answer("❌ Ошибка при загрузке профиля.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_view_user_tasks:"))
+async def admin_view_user_tasks(callback_query: CallbackQuery, state: FSMContext):
+    """Показывает заявки выбранного пользователя."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+    
+    try:
+        user_id = int(callback_query.data.split(":")[1])
+        user = await db_manager.get_user_profile(user_id)
+        
+        if not user:
+            await callback_query.answer("❌ Пользователь не найден.", show_alert=True)
+            return
+        
+        # Показываем индикатор загрузки
+        await callback_query.answer("⏳ Загрузка заявок...")
+        
+        # Получаем заявки пользователя
+        from user_handlers import get_user_tasks
+        tasks = await get_user_tasks(user_id, limit=50, only_active=False)
+        
+        if tasks is None:
+            await callback_query.message.answer(
+                "❌ Ошибка при получении заявок пользователя.",
+                parse_mode="HTML"
+            )
+            return
+        
+        if not tasks:
+            user_name = user.full_name or f"ID: {user_id}"
+            await callback_query.message.answer(
+                f"📋 <b>Заявки пользователя</b>\n\n"
+                f"👤 <b>{user_name}</b> (ID: {user_id})\n\n"
+                f"❌ У пользователя нет заявок.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Формируем список заявок
+        user_name = user.full_name or f"ID: {user_id}"
+        lines = [
+            f"📋 <b>Заявки пользователя</b>\n",
+            f"👤 <b>{user_name}</b> (ID: {user_id})\n",
+            f"Всего заявок: {len(tasks)}\n",
+            "────────────────────\n"
+        ]
+        
+        # Показываем первые 20 заявок
+        for task in tasks[:20]:
+            task_id = task.get('id')
+            task_name = task.get('name', 'Без названия')[:50]
+            status_obj = task.get('status', {})
+            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
+            
+            # Получаем название ресторана (если есть)
+            counterparty_id = None
+            counterparty_obj = task.get('counterparty', {})
+            if isinstance(counterparty_obj, dict):
+                counterparty_id = counterparty_obj.get('id')
+            
+            restaurant_info = ""
+            if counterparty_id:
+                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            
+            lines.append(
+                f"📋 <b>#{task_id}</b> – {status_name}\n"
+                f"📝 {task_name}{restaurant_info}\n"
+                f"────────────────────"
+            )
+        
+        if len(tasks) > 20:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        
+        # Создаем клавиатуру с кнопками для просмотра деталей заявок
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        task_buttons = []
+        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
+            task_id = task.get('id')
+            task_name = task.get('name', f'Заявка #{task_id}')[:30]
+            task_buttons.append([
+                InlineKeyboardButton(
+                    text=f"#{task_id} - {task_name}",
+                    callback_data=f"admin_view_task:{task_id}"
+                )
+            ])
+        
+        task_buttons.append([
+            InlineKeyboardButton(text="◀️ Назад к профилю", callback_data=f"admin_view_user:{user_id}")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
+        
+        await callback_query.message.answer(
+            "\n".join(lines),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Error viewing user tasks: {e}", exc_info=True)
+        await callback_query.answer("❌ Ошибка при загрузке заявок.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_view_task:"))
+async def admin_view_task_details(callback_query: CallbackQuery, state: FSMContext):
+    """Показывает детали заявки для админа."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+    
+    try:
+        task_id = int(callback_query.data.split(":")[1])
+        
+        # Получаем информацию о задаче из Planfix API
+        from planfix_client import planfix_client
+        task_response = await planfix_client.get_task_by_id(
+            task_id,
+            fields="id,name,description,status,statusId,project.id,project.name,template.id,template.name,counterparty.id,counterparty.name,assignees,customFieldData,files,dateTime,dateOfLastUpdate"
+        )
+        
+        if not task_response or task_response.get('result') != 'success':
+            await callback_query.answer("❌ Заявка не найдена.", show_alert=True)
+            return
+        
+        task = task_response.get('task', {})
+        
+        # Форматируем информацию о задаче
+        task_name = task.get('name', 'Без названия')
+        task_desc = task.get('description', 'Нет описания')[:500]
+        
+        status_obj = task.get('status', {})
+        status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
+        
+        counterparty_obj = task.get('counterparty', {})
+        counterparty_name = counterparty_obj.get('name', 'Не указан') if isinstance(counterparty_obj, dict) else 'Не указан'
+        
+        project_obj = task.get('project', {})
+        project_name = project_obj.get('name', 'Не указан') if isinstance(project_obj, dict) else 'Не указан'
+        
+        template_obj = task.get('template', {})
+        template_name = template_obj.get('name', 'Не указан') if isinstance(template_obj, dict) else 'Не указан'
+        
+        assignees = task.get('assignees', {}).get('users', []) or []
+        assignees_list = []
+        for assignee in assignees:
+            if isinstance(assignee, dict):
+                assignee_name = assignee.get('name', 'Неизвестно')
+                assignees_list.append(assignee_name)
+        
+        task_text = (
+            f"📋 <b>Заявка #{task_id}</b>\n\n"
+            f"📝 <b>Название:</b> {task_name}\n"
+            f"📄 <b>Описание:</b> {task_desc}\n"
+            f"📊 <b>Статус:</b> {status_name}\n"
+            f"🏢 <b>Проект:</b> {project_name}\n"
+            f"📋 <b>Шаблон:</b> {template_name}\n"
+            f"🏪 <b>Ресторан:</b> {counterparty_name}\n"
+        )
+        
+        if assignees_list:
+            task_text += f"👷 <b>Исполнители:</b> {', '.join(assignees_list)}\n"
+        
+        # Получаем информацию о пользователе, создавшем заявку
+        from db_manager import DBManager
+        sync_db_manager = DBManager()
+        with sync_db_manager.get_db() as db:
+            from database import TaskCache
+            task_cache = db.query(TaskCache).filter(TaskCache.task_id == task_id).first()
+            if task_cache and task_cache.user_telegram_id:
+                user = await db_manager.get_user_profile(task_cache.user_telegram_id)
+                if user:
+                    task_text += f"👤 <b>Создал:</b> {user.full_name or f'ID: {user.telegram_id}'}\n"
+        
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад к заявкам", callback_data=f"admin_view_user_tasks:{task_cache.user_telegram_id if task_cache and task_cache.user_telegram_id else '0'}")]
+            ]
+        )
+        
+        await callback_query.message.answer(task_text, reply_markup=keyboard, parse_mode="HTML")
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Error viewing task details: {e}", exc_info=True)
+        await callback_query.answer("❌ Ошибка при загрузке заявки.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin_view_executor:"))

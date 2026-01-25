@@ -231,11 +231,17 @@ def get_admin_executors_menu_keyboard():
 
 def get_admin_profile_actions_keyboard(profile_type: str, profile_id: int):
     """Клавиатура действий с профилем (пользователь/исполнитель)."""
-    buttons = [
+    buttons = []
+    
+    # Для пользователей добавляем кнопку просмотра заявок
+    if profile_type == "user":
+        buttons.append([InlineKeyboardButton(text="📋 Заявки пользователя", callback_data=f"admin_view_user_tasks:{profile_id}")])
+    
+    buttons.extend([
         [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"admin_edit_{profile_type}:{profile_id}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_delete_{profile_type}:{profile_id}")],
         [InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"admin_list_{profile_type}s")]
-    ]
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
