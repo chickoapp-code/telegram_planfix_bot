@@ -1696,7 +1696,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     
                     logger.info(f"Found {len(cached_tasks)} tasks in TaskCache for executor {executor.telegram_id} with statuses {working_status_ids}")
                     
-                    # Преобразуем TaskCache в формат для обработки
+                    # Преобразуем TaskCache в формат для обработки (такая же логика, как у админа)
                     for cached_task in cached_tasks:
                         task_id = cached_task.task_id
                         if task_id in seen_task_ids:
@@ -1705,190 +1705,20 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         seen_task_ids.add(task_id)
                         
                         # Преобразуем TaskCache в формат, похожий на ответ API
-                        task = {
+                        task_dict = {
                             'id': cached_task.task_id,
                             'name': cached_task.name or 'Без названия',
-                            'description': '',  # Описание не хранится в TaskCache
                             'status': {
                                 'id': cached_task.status_id,
                                 'name': cached_task.status_name or 'Неизвестно'
                             },
-                            'template': {
-                                'id': cached_task.template_id
-                            } if cached_task.template_id else {},
                             'counterparty': {
                                 'id': cached_task.counterparty_id
                             } if cached_task.counterparty_id else {},
-                            'project': {
-                                'id': cached_task.project_id
-                            } if cached_task.project_id else {},
                             'dateTime': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None,
-                            'tags': [],
-                            'dataTags': [],
-                            'assignees': {}  # Информация о назначенных не хранится в TaskCache
+                            'dateOfLastUpdate': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None
                         }
-                        
-                        task_id_normalized = task_id
-                        
-                        # Данные уже получены из TaskCache
-                        task_status_id = cached_task.status_id
-                        task_status_name = cached_task.status_name
-                        template_id = cached_task.template_id
-                        counterparty_id = cached_task.counterparty_id
-                        
-                        # Проверяем статус (должен быть "Новая" или "В работе")
-                        if task_status_id not in working_status_ids:
-                            logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} not in allowed statuses {working_status_ids}")
-                            continue
-                        
-                        # ВАЖНО: Исключаем завершенные, отмененные и отклоненные задачи
-                        try:
-                            final_status_ids = _collect_status_ids(
-                                (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
-                                required=False
-                            )
-                            if not final_status_ids:
-                                final_status_ids = set()
-                                for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
-                                    try:
-                                        sid = require_status_id(status_key)
-                                        if sid:
-                                            final_status_ids.add(sid)
-                                    except Exception:
-                                        pass
-                            
-                            if task_status_id is not None and task_status_id in final_status_ids:
-                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} is final")
-                                continue
-                            
-                            if task_status_name:
-                                status_name_lower = task_status_name.lower().strip()
-                                final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
-                                if any(keyword in status_name_lower for keyword in final_keywords):
-                                    logger.debug(f"Task {task_id} filtered out: status_name '{task_status_name}' indicates final status")
-                                    continue
-                        except Exception as final_filter_err:
-                            logger.warning(f"Error checking final status for task {task_id}: {final_filter_err}")
-                        
-                        # Фильтрация по дате (последние 7 дней) - используем date_of_last_update
-                        task_date = cached_task.date_of_last_update
-                        if task_date:
-                            if task_date < seven_days_ago:
-                                logger.debug(f"Task {task_id} filtered out: date {task_date} is older than 7 days")
-                                continue
-                        else:
-                            logger.debug(f"Task {task_id} has no date_of_last_update, skipping date filter")
-
-                        # Теги не хранятся в TaskCache, используем пустой список
-                        task_tag_names = set()
-                        task_name = cached_task.name or ''
-                        task_desc = ''  # Описание не хранится в TaskCache
-                        
-                        # Задачи из TaskCache считаются созданными через бота (или назначенными)
-                        is_bot_task_verified = True
-                        
-                        # Логируем только задачи, которые прошли проверку статуса и даты
-                        logger.info(
-                            f"Task {task_id} passed filters: template_id={template_id}, counterparty_id={counterparty_id}, "
-                            f"status_id={task_status_id}, status_name={task_status_name}, "
-                            f"tags={list(task_tag_names)}, name={task_name}, "
-                            f"desc_preview={task_desc}, is_bot_task_verified={is_bot_task_verified}"
-                        )
-
-                        # Фильтр по шаблонам (только если у исполнителя есть ограничения)
-                        # ВАЖНО: Для назначенных задач (executor_planfix_id) НЕ фильтруем по шаблону
-                        # Задачи, назначенные вручную в Planfix, показываются независимо от шаблона
-                        if executor_planfix_id:
-                            # Для назначенных задач не применяем фильтр по шаблону
-                            logger.debug(
-                                f"Task {task_id} is assigned to executor - skipping template filter "
-                                f"(template_id={template_id}, allowed_templates={allowed_templates})"
-                            )
-                        elif allowed_templates:
-                            if template_id is None or template_id not in allowed_templates:
-                                logger.info(
-                                    f"Task {task_id} filtered out by template filter: "
-                                    f"template_id={template_id} not in allowed_templates={allowed_templates} "
-                                    f"(is_bot_task={is_bot_task_verified})"
-                                )
-                                continue
-                        else:
-                            # Если allowed_templates пусто, значит исполнитель может видеть все шаблоны
-                            logger.debug(f"Task {task_id} passed template filter (no restrictions)")
-
-                        # Фильтр по ресторанам (только если у исполнителя есть ограничения)
-                        if allowed_restaurant_ids:
-                            if counterparty_id is None or counterparty_id not in allowed_restaurant_ids:
-                                # Если задача назначена на исполнителя, показываем её даже если ресторан не соответствует
-                                if executor_planfix_id:
-                                    logger.debug(
-                                        f"Task {task_id} restaurant {counterparty_id} not in allowed_restaurant_ids, "
-                                        f"but task is assigned to executor - showing anyway"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Task {task_id} filtered out by restaurant filter: "
-                                        f"counterparty_id={counterparty_id} not in allowed_restaurant_ids={allowed_restaurant_ids} "
-                                        f"(executor has {len(allowed_restaurant_ids)} restaurants)"
-                                    )
-                                    continue
-                        else:
-                            # Если allowed_restaurant_ids пусто, значит исполнитель может видеть все рестораны
-                            logger.debug(f"Task {task_id} passed restaurant filter (no restrictions)")
-
-                        seen_task_ids.add(task_id)
-                        
-                        # Фильтр по тегам: если у исполнителя есть ограничения, задача ДОЛЖНА иметь соответствующий тег
-                        # ИСКЛЮЧЕНИЕ: если шаблон правильный, но тега нет - показываем (для обратной совместимости)
-                        # ВАЖНО: Для назначенных задач (executor_planfix_id) фильтры менее строгие
-                        if allowed_tag_names:
-                            if task_tag_names:
-                                # У задачи есть теги - проверяем соответствие
-                                if not (task_tag_names & allowed_tag_names):
-                                    # У задачи есть теги, но они не совпадают с разрешенными
-                                    # Если задача назначена на исполнителя, показываем её даже если теги не соответствуют
-                                    if executor_planfix_id:
-                                        logger.debug(
-                                            f"Task {task_id} tags {task_tag_names} don't match allowed_tags, "
-                                            f"but task is assigned to executor - showing anyway"
-                                        )
-                                    else:
-                                        logger.info(
-                                            f"Task {task_id} filtered out by tag filter: "
-                                            f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
-                                        )
-                                        continue
-                                else:
-                                    logger.debug(f"Task {task_id} passed tag filter: task_tags={task_tag_names} match allowed_tags={allowed_tag_names}")
-                            else:
-                                # У задачи нет тегов - проверяем, соответствует ли шаблон
-                                # Если шаблон правильный, показываем задачу (для обратной совместимости со старыми задачами)
-                                if template_id in allowed_templates:
-                                    logger.debug(
-                                        f"Task {task_id} passed tag filter: no tags but template_id={template_id} matches allowed_templates "
-                                        f"(backward compatibility for old tasks)"
-                                    )
-                                else:
-                                    # Шаблон не соответствует, и тегов нет
-                                    # Если задача назначена на исполнителя, показываем её даже если шаблон не соответствует
-                                    if executor_planfix_id:
-                                        logger.debug(
-                                            f"Task {task_id} has no tags and template_id={template_id} not in allowed_templates, "
-                                            f"but task is assigned to executor - showing anyway"
-                                        )
-                                    else:
-                                        # Шаблон не соответствует, и тегов нет - отфильтровываем
-                                        logger.info(
-                                            f"Task {task_id} filtered out by tag filter: "
-                                            f"task has no tags and template_id={template_id} not in allowed_templates={allowed_templates}"
-                                        )
-                                        continue
-                        else:
-                            # Если у исполнителя нет ограничений по тегам - пропускаем фильтр
-                            logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")
-
-                        logger.info(f"Task {task_id} passed all filters, adding to list")
-                        all_new_tasks.append(task)
+                        all_new_tasks.append(task_dict)
                     
                     logger.info(f"Loaded {len(all_new_tasks)} tasks from TaskCache for executor {executor.telegram_id}")
                 else:
