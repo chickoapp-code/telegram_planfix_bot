@@ -1889,10 +1889,10 @@ async def show_new_tasks(message: Message, state: FSMContext):
 
                         logger.info(f"Task {task_id} passed all filters, adding to list")
                         all_new_tasks.append(task)
-                
-                logger.info(f"Loaded {len(all_new_tasks)} tasks from TaskCache for executor {executor.telegram_id}")
-            else:
-                logger.info(f"No task assignments found for executor {executor.telegram_id}")
+                    
+                    logger.info(f"Loaded {len(all_new_tasks)} tasks from TaskCache for executor {executor.telegram_id}")
+                else:
+                    logger.info(f"No task assignments found for executor {executor.telegram_id}")
             
             # Фильтрация: показываем только заявки, созданные через бота
             # НО: если задача назначена на исполнителя (executor_planfix_id), показываем все назначенные задачи
