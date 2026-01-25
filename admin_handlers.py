@@ -322,7 +322,7 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
                     response = await planfix_client.get_task_list(
                         filters=filters,
                         fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
-                        pageSize=50
+                        page_size=50
                     )
                     
                     if response and response.get('result') == 'success':
@@ -993,7 +993,7 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                     response = await planfix_client.get_task_list(
                         filters=filters,
                         fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
-                        pageSize=50
+                        page_size=50
                     )
                     
                     if response and response.get('result') == 'success':
