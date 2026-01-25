@@ -1670,261 +1670,84 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 logger.debug(f"Unable to parse Planfix date value: {raw_value}")
                 return None
             
-            # Для назначенных задач запрашиваем каждый статус отдельно (NEW и IN_PROGRESS)
-            if executor_planfix_id and working_status_ids:
-                status_ids_to_query = working_status_ids
-                logger.info(f"Will query assigned tasks for each status: {status_ids_to_query}")
-            else:
-                status_ids_to_query = working_status_ids if working_status_ids else []
+            # Ищем задачи в БД бота (TaskCache) через TaskAssignment
+            logger.info(f"📋 Searching tasks in bot database (TaskCache) for executor {executor.telegram_id}")
+            
+            with db_manager.get_db() as db:
+                from database import TaskAssignment, TaskCache
                 
-                if not status_ids_to_query:
-                    logger.warning("No working status IDs found, will query tasks without status filter")
-                    status_ids_to_query = [None]
-
-            page_size = 100
-            max_pages_per_status = 20  # Увеличиваем количество страниц для получения всех задач
-            max_total_tasks = 2000  # Увеличиваем лимит задач для обработки
-
-            for status_id in status_ids_to_query:
-                offset = 0
-                page_index = 0
+                # Получаем все активные назначения для этого исполнителя
+                assignments = db.query(TaskAssignment).filter(
+                    TaskAssignment.executor_telegram_id == executor.telegram_id,
+                    TaskAssignment.status == "active"
+                ).all()
                 
-                # Если уже набрали достаточно задач, прекращаем запросы
-                if len(all_new_tasks) >= max_total_tasks:
-                    logger.info(f"Reached max_total_tasks limit ({max_total_tasks}), stopping pagination")
-                    break
-
-                while page_index < max_pages_per_status:
-                    # Проверяем лимит задач
-                    if len(all_new_tasks) >= max_total_tasks:
-                        break
-                    filters = []
-
-                    # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально по назначенным исполнителям
-                    # Это более надежный способ, так как фильтр по назначенным исполнителям (type: 2) может не работать правильно
-                    if status_id is not None:
-                        filters.append(
-                            {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status
-                        )
+                logger.info(f"Found {len(assignments)} active task assignments for executor {executor.telegram_id}")
+                
+                if assignments:
+                    # Получаем task_id из назначений
+                    task_ids = [assignment.task_id for assignment in assignments]
                     
-                    # УБИРАЕМ фильтр по дате, чтобы получать ВСЕ задачи со статусами "Новая" и "В работе"
-                    # Это важно, так как задачи могут быть старше 30 дней
-                    # Фильтр по дате был удален для получения всех назначенных задач
-
-                    logger.info(
-                        f"Querying tasks with status_id={status_id}, offset={offset}, page_size={page_size} (no date filter)"
-                    )
-
-                    # Проверяем кэш запроса к API (отключаем кэш для первой страницы, чтобы видеть новые задачи)
-                    api_cache_key = f"api_tasks:{status_id}:{offset}:{page_size}"
-                    tasks_response = None
-                    # Для первой страницы не используем кэш, чтобы видеть новые задачи
-                    # ВАЖНО: Не используем кэш для API запросов, чтобы всегда получать актуальные статусы задач
-                    # Это гарантирует, что завершенные задачи не будут показываться в списке
-                    # Кэш может содержать устаревшие данные о статусах задач
-                    logger.debug(f"Fetching fresh task list from API (not using cache) to ensure accurate task statuses (status_id={status_id}, offset={offset}, executor_filter={executor_planfix_id})")
-                    # Для назначенных задач запрашиваем также поле assignees для проверки
-                    fields = "id,name,description,status,template,counterparty,dateTime,tags,dataTags,project,assignees"
-                    tasks_response = await planfix_client.get_task_list(
-                        filters=filters,
-                        fields=fields,
-                        page_size=page_size,
-                        offset=offset,
-                        result_order=[{"field": "dateTime", "direction": "Desc"}]
-                    )
-                    # НЕ кэшируем результат API запроса, чтобы всегда получать актуальные статусы
-
-                    # Детальное логирование ответа для диагностики
-                    if tasks_response:
-                        logger.debug(f"Tasks response for status {status_id}: result={tasks_response.get('result')}, keys={list(tasks_response.keys())}")
-                        if tasks_response.get('result') == 'success':
-                            logger.debug(f"Response structure: tasks key exists={('tasks' in tasks_response)}, tasks value type={type(tasks_response.get('tasks'))}")
-                    else:
-                        logger.warning(f"Empty tasks_response for status {status_id}")
-
-                    if not tasks_response or tasks_response.get('result') != 'success':
-                        logger.warning(f"Failed to load task list for status {status_id}: {tasks_response}")
-                        break
-
-                    tasks = tasks_response.get('tasks', []) or []
-                    logger.info(
-                        f"📥 Executor {executor.telegram_id} fetched {len(tasks)} tasks for status {status_id} (page {page_index + 1}), "
-                        f"total tasks so far: {len(all_new_tasks)}"
-                    )
+                    # Получаем задачи из TaskCache со статусами "Новая" и "В работе"
+                    cached_tasks = db.query(TaskCache).filter(
+                        TaskCache.task_id.in_(task_ids),
+                        TaskCache.status_id.in_(working_status_ids)
+                    ).order_by(TaskCache.date_of_last_update.desc().nullslast()).all()
                     
-                    # Дополнительная диагностика если задач нет, но ответ успешный
-                    if not tasks and tasks_response.get('result') == 'success':
-                        logger.warning(f"API returned success but no tasks. Full response keys: {list(tasks_response.keys())}, response sample: {str(tasks_response)[:500]}")
-
-                    if tasks:
-                        task_ids = [t.get('id') for t in tasks]
-                        logger.info(
-                            f"All tasks fetched for status {status_id}, page {page_index + 1}: "
-                            f"{task_ids[:20]}..." if len(task_ids) > 20 else
-                            f"All tasks fetched for status {status_id}, page {page_index + 1}: {task_ids}"
-                        )
-                    else:
-                        logger.debug(f"No tasks found for status {status_id} on page {page_index + 1}")
-                        break
-
-                    oldest_task_date_in_page = None
-
-                    for task in tasks:
-                        task_id = task.get('id')
-                        if not task_id or task_id in seen_task_ids:
+                    logger.info(f"Found {len(cached_tasks)} tasks in TaskCache for executor {executor.telegram_id} with statuses {working_status_ids}")
+                    
+                    # Преобразуем TaskCache в формат для обработки
+                    for cached_task in cached_tasks:
+                        task_id = cached_task.task_id
+                        if task_id in seen_task_ids:
                             continue
-
-                        # Если у исполнителя есть planfix_user_id или planfix_contact_id, проверяем назначение задачи
-                        if executor_planfix_id and executor_planfix_id_type:
-                            assignees = task.get('assignees', {}) or {}
-                            
-                            # Проверяем всех назначенных: users, contacts, groups
-                            assignee_users = assignees.get('users', []) or []
-                            assignee_contacts = assignees.get('contacts', []) or []
-                            assignee_groups = assignees.get('groups', []) or []
-                            
-                            # Объединяем всех назначенных в один список для проверки
-                            all_assignees = assignee_users + assignee_contacts + assignee_groups
-                            
-                            is_assigned = False
-                            for assignee in all_assignees:
-                                if not isinstance(assignee, dict):
-                                    continue
-                                
-                                assignee_id = assignee.get('id', '')
-                                if not assignee_id:
-                                    continue
-                                
-                                if isinstance(assignee_id, str):
-                                    # Может быть "user:123" или "contact:123"
-                                    if ':' in assignee_id:
-                                        assignee_type, assignee_num = assignee_id.split(':', 1)
-                                        try:
-                                            assignee_num_int = int(assignee_num)
-                                            if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
-                                                is_assigned = True
-                                                logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
-                                                break
-                                        except (ValueError, TypeError):
-                                            continue
-                                    else:
-                                        # Попробуем как число
-                                        try:
-                                            assignee_num_int = int(assignee_id)
-                                            if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
-                                                is_assigned = True
-                                                logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
-                                                break
-                                        except (ValueError, TypeError):
-                                            continue
-                                elif isinstance(assignee_id, int):
-                                    # Если ID без префикса, проверяем как user
-                                    if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
-                                        is_assigned = True
-                                        logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
-                                        break
-                            
-                            # Пропускаем задачу, если она не назначена на этого исполнителя
-                            if not is_assigned:
-                                logger.debug(f"Task {task_id} is not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees), skipping")
-                                continue
-
-                        # Нормализуем task_id для использования в кеше
-                        try:
-                            if isinstance(task_id, str) and ':' in task_id:
-                                task_id_normalized = int(task_id.split(':')[-1])
-                            else:
-                                task_id_normalized = int(task_id)
-                        except (ValueError, TypeError):
-                            task_id_normalized = None
                         
-                        # Пробуем получить статус из кеша (как у заявителя)
-                        task_status_id = None
-                        task_status_name = None
-                        if task_id_normalized:
-                            try:
-                                cached_task = await db_manager.run(
-                                    db_manager._manager.get_task_cache,
-                                    task_id_normalized
-                                )
-                                if cached_task:
-                                    task_status_id = cached_task.status_id
-                                    task_status_name = cached_task.status_name
-                                    logger.debug(f"✅ Got status from cache for task {task_id_normalized}: {task_status_id} ({task_status_name})")
-                            except Exception as cache_err:
-                                logger.debug(f"Could not get status from cache for task {task_id_normalized}: {cache_err}")
+                        seen_task_ids.add(task_id)
                         
-                        # Если не получили из кеша, используем данные из API
-                        if task_status_id is None:
-                            task_status = task.get('status', {})
-                            task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
-                            task_status_name = task_status.get('name') if isinstance(task_status, dict) else None
-                            
-                            # Нормализуем status_id
-                            if isinstance(task_status_id, str) and ':' in str(task_status_id):
-                                try:
-                                    task_status_id = int(str(task_status_id).split(':')[-1])
-                                except Exception:
-                                    pass
-                            elif isinstance(task_status_id, int):
-                                pass  # Уже число
-                            else:
-                                task_status_id = None
-
-                        template_id = _normalize_pf_id((task.get('template') or {}).get('id'))
-                        counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
-
-                        # Если используем фильтр по назначенным исполнителям, проверяем assignees
-                        if executor_planfix_id and executor_planfix_id_type:
-                            # Проверяем, что задача действительно назначена на этого исполнителя
-                            assignees = task.get('assignees', {}) or {}
-                            assignee_users = assignees.get('users', []) or []
-                            
-                            is_assigned = False
-                            for assignee in assignee_users:
-                                assignee_id = assignee.get('id', '')
-                                if isinstance(assignee_id, str):
-                                    # Может быть "user:123" или "contact:123"
-                                    if ':' in assignee_id:
-                                        assignee_type, assignee_num = assignee_id.split(':', 1)
-                                        try:
-                                            assignee_num_int = int(assignee_num)
-                                            if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
-                                                is_assigned = True
-                                                break
-                                        except (ValueError, TypeError):
-                                            continue
-                                elif isinstance(assignee_id, int):
-                                    # Если ID без префикса, проверяем как user
-                                    if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
-                                        is_assigned = True
-                                        break
-                            
-                            if not is_assigned:
-                                logger.debug(f"Task {task_id} filtered out: not assigned to executor {executor_planfix_id} ({executor_planfix_id_type})")
-                                continue
-                            
-                            # Для назначенных задач проверяем, что статус "Новая" или "В работе"
-                            if working_status_ids and task_status_id not in working_status_ids:
-                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} not in allowed statuses {working_status_ids}")
-                                continue
-                        # Старая логика: фильтруем по статусу (если нет planfix_id)
-                        elif status_id is not None:
-                            if task_status_id != status_id:
-                                continue
-                        elif working_status_ids:
-                            if task_status_id not in working_status_ids:
-                                continue
+                        # Преобразуем TaskCache в формат, похожий на ответ API
+                        task = {
+                            'id': cached_task.task_id,
+                            'name': cached_task.name or 'Без названия',
+                            'description': '',  # Описание не хранится в TaskCache
+                            'status': {
+                                'id': cached_task.status_id,
+                                'name': cached_task.status_name or 'Неизвестно'
+                            },
+                            'template': {
+                                'id': cached_task.template_id
+                            } if cached_task.template_id else {},
+                            'counterparty': {
+                                'id': cached_task.counterparty_id
+                            } if cached_task.counterparty_id else {},
+                            'project': {
+                                'id': cached_task.project_id
+                            } if cached_task.project_id else {},
+                            'dateTime': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None,
+                            'tags': [],
+                            'dataTags': [],
+                            'assignees': {}  # Информация о назначенных не хранится в TaskCache
+                        }
+                        
+                        task_id_normalized = task_id
+                        
+                        # Данные уже получены из TaskCache
+                        task_status_id = cached_task.status_id
+                        task_status_name = cached_task.status_name
+                        template_id = cached_task.template_id
+                        counterparty_id = cached_task.counterparty_id
+                        
+                        # Проверяем статус (должен быть "Новая" или "В работе")
+                        if task_status_id not in working_status_ids:
+                            logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} not in allowed statuses {working_status_ids}")
+                            continue
                         
                         # ВАЖНО: Исключаем завершенные, отмененные и отклоненные задачи
-                        # Для всех задач (и назначенных, и неназначенных) показываем только "Новая" и "В работе"
                         try:
                             final_status_ids = _collect_status_ids(
                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
                                 required=False
                             )
                             if not final_status_ids:
-                                # Если не получили через collect_status_ids, пробуем через require_status_id
                                 final_status_ids = set()
                                 for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
                                     try:
@@ -1934,12 +1757,10 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                     except Exception:
                                         pass
                             
-                            # Проверяем по ID статуса
                             if task_status_id is not None and task_status_id in final_status_ids:
-                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} is final (COMPLETED/FINISHED/CANCELLED/REJECTED)")
+                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} is final")
                                 continue
                             
-                            # Проверяем по названию статуса (дополнительная проверка)
                             if task_status_name:
                                 status_name_lower = task_status_name.lower().strip()
                                 final_keywords = ["выполнен", "заверш", "отмен", "отклон", "completed", "finished", "cancelled", "rejected"]
@@ -1948,25 +1769,23 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                     continue
                         except Exception as final_filter_err:
                             logger.warning(f"Error checking final status for task {task_id}: {final_filter_err}")
-                            # Продолжаем, если не удалось проверить
                         
-                        # Дополнительная фильтрация по дате (последние 7 дней)
-                        task_date = _parse_planfix_datetime(task.get('dateTime'))
+                        # Фильтрация по дате (последние 7 дней) - используем date_of_last_update
+                        task_date = cached_task.date_of_last_update
                         if task_date:
-                            if oldest_task_date_in_page is None or task_date < oldest_task_date_in_page:
-                                oldest_task_date_in_page = task_date
                             if task_date < seven_days_ago:
                                 logger.debug(f"Task {task_id} filtered out: date {task_date} is older than 7 days")
                                 continue
                         else:
-                            logger.debug(f"Task {task_id} has no parseable dateTime, skipping date filter")
+                            logger.debug(f"Task {task_id} has no date_of_last_update, skipping date filter")
 
-                        task_tag_names = _extract_task_tags(task)
-                        task_name = task.get('name', '')[:50]
-                        task_desc = (task.get('description') or '')[:100]
+                        # Теги не хранятся в TaskCache, используем пустой список
+                        task_tag_names = set()
+                        task_name = cached_task.name or ''
+                        task_desc = ''  # Описание не хранится в TaskCache
                         
-                        # БЫСТРАЯ ПРОВЕРКА: Проверяем, создана ли задача через бота (используем предзагруженный set)
-                        is_bot_task_verified = task_id in bot_task_ids_set
+                        # Задачи из TaskCache считаются созданными через бота (или назначенными)
+                        is_bot_task_verified = True
                         
                         # Логируем только задачи, которые прошли проверку статуса и даты
                         logger.info(
@@ -2173,46 +1992,13 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 
                 return is_bot
             
-            # Фильтрация по BotLog: показываем только заявки, созданные через бота
-            # НО: если задача назначена на исполнителя (executor_planfix_id), показываем все назначенные задачи
-            before_bot_filter = len(all_new_tasks)
-            filtered_tasks = []
-            for t in all_new_tasks:
-                # Если задача назначена на исполнителя, показываем её независимо от того, создана ли она через бота
-                if executor_planfix_id:
-                    # Проверяем, что задача действительно назначена на этого исполнителя
-                    assignees = t.get('assignees', {}) or {}
-                    assignee_users = assignees.get('users', []) or []
-                    is_assigned_to_executor = False
-                    for assignee in assignee_users:
-                        assignee_id = assignee.get('id', '')
-                        if isinstance(assignee_id, str):
-                            if ':' in assignee_id:
-                                assignee_type, assignee_num = assignee_id.split(':', 1)
-                                try:
-                                    assignee_num_int = int(assignee_num)
-                                    if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
-                                        is_assigned_to_executor = True
-                                        break
-                                except (ValueError, TypeError):
-                                    continue
-                        elif isinstance(assignee_id, int):
-                            if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
-                                is_assigned_to_executor = True
-                                break
-                    
-                    if is_assigned_to_executor:
-                        filtered_tasks.append(t)
-                        logger.debug(f"Task {t.get('id')} added: assigned to executor {executor_planfix_id}")
-                    else:
-                        logger.debug(f"Task {t.get('id')} filtered out: not assigned to executor {executor_planfix_id}")
-                elif _is_bot_task(t):
-                    filtered_tasks.append(t)
-                else:
-                    logger.info(f"Task {t.get('id')} filtered out by _is_bot_task check")
+            # Все задачи из TaskCache уже назначены на исполнителя (получены через TaskAssignment)
+            # Поэтому не нужно дополнительно фильтровать по назначению
+            filtered_tasks = all_new_tasks
+            logger.info(f"All {len(filtered_tasks)} tasks from TaskCache are assigned to executor, no additional filtering needed")
             
-            # КРИТИЧНО: Проверяем недавно созданные задачи из BotLog, которые могли не попасть в API запрос
-            # Это может произойти, если задача только что создана и еще не попала в первую страницу
+            # КРИТИЧНО: Проверяем недавно созданные задачи из BotLog, которые могли не попасть в TaskCache
+            # Это может произойти, если задача только что создана и еще не синхронизирована в TaskCache
             try:
                 from datetime import datetime, timedelta
                 recent_time = datetime.now() - timedelta(hours=1)  # Задачи за последний час

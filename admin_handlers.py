@@ -281,9 +281,12 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
         
         tasks = []
         
-        # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально
-        from planfix_client import planfix_client
+        # Ищем задачи в БД бота (TaskCache) через TaskAssignment
+        from db_manager import DBManager
+        from database import TaskAssignment, TaskCache
         from services.status_registry import StatusKey, collect_status_ids, require_status_id
+        
+        sync_db_manager = DBManager()
         
         # Получаем статусы "Новая" и "В работе"
         working_status_ids = collect_status_ids(
@@ -307,145 +310,43 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             )
             return
         
-        # Получаем все задачи для каждого статуса (без фильтра по исполнителю)
-        all_tasks = []
-        for status_id in working_status_ids:
-            if status_id is None:
-                continue
+        with sync_db_manager.get_db() as db:
+            # Получаем все активные назначения для этого исполнителя
+            assignments = db.query(TaskAssignment).filter(
+                TaskAssignment.executor_telegram_id == executor_id,
+                TaskAssignment.status == "active"
+            ).all()
             
-            filters = [
-                {
-                    "type": 10,  # Task status
-                    "operator": "equal",
-                    "value": status_id
-                }
-            ]
+            logger.info(f"Found {len(assignments)} active task assignments for executor {executor_id}")
             
-            try:
-                # Запрашиваем ВСЕ задачи с пагинацией, чтобы найти все назначенные
-                page_size = 100
-                offset = 0
-                max_pages = 20  # Максимум 20 страниц (2000 задач) для каждого статуса
+            if assignments:
+                # Получаем task_id из назначений
+                task_ids = [assignment.task_id for assignment in assignments]
                 
-                while offset < max_pages * page_size:
-                    response = await planfix_client.get_task_list(
-                        filters=filters,
-                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
-                        page_size=page_size,
-                        offset=offset
-                    )
-                    
-                    if response and response.get('result') == 'success':
-                        tasks_list = response.get('tasks', [])
-                        if tasks_list:
-                            all_tasks.extend(tasks_list)
-                            logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id} (offset={offset}, total so far: {len(all_tasks)})")
-                            
-                            # Если получили меньше задач, чем page_size, значит это последняя страница
-                            if len(tasks_list) < page_size:
-                                break
-                        else:
-                            # Нет задач на этой странице, прекращаем
-                            break
-                    else:
-                        logger.warning(f"Failed to fetch tasks with status {status_id} at offset {offset}: {response}")
-                        break
-                    
-                    offset += page_size
-                    
-            except Exception as e:
-                logger.error(f"Error fetching tasks with status {status_id}: {e}")
-        
-        # Фильтруем задачи по назначенным исполнителям
-        if executor_planfix_id and executor_planfix_id_type:
-            logger.info(f"Filtering tasks by executor {executor_planfix_id_type}:{executor_planfix_id} from {len(all_tasks)} total tasks")
-            for task in all_tasks:
-                task_id = task.get('id')
-                assignees = task.get('assignees', {}) or {}
+                # Получаем задачи из TaskCache
+                cached_tasks = db.query(TaskCache).filter(
+                    TaskCache.task_id.in_(task_ids),
+                    TaskCache.status_id.in_(working_status_ids)
+                ).order_by(TaskCache.date_of_last_update.desc().nullslast()).all()
                 
-                # Проверяем всех назначенных: users, contacts, groups
-                assignee_users = assignees.get('users', []) or []
-                assignee_contacts = assignees.get('contacts', []) or []
-                assignee_groups = assignees.get('groups', []) or []
+                logger.info(f"Found {len(cached_tasks)} tasks in TaskCache for executor {executor_id} with statuses {working_status_ids}")
                 
-                # Объединяем всех назначенных в один список для проверки
-                all_assignees = assignee_users + assignee_contacts + assignee_groups
-                
-                is_assigned = False
-                for assignee in all_assignees:
-                    if not isinstance(assignee, dict):
-                        continue
-                    
-                    assignee_id = assignee.get('id', '')
-                    if not assignee_id:
-                        continue
-                    
-                    if isinstance(assignee_id, str):
-                        # Может быть "user:123" или "contact:123"
-                        if ':' in assignee_id:
-                            assignee_type, assignee_num = assignee_id.split(':', 1)
-                            try:
-                                assignee_num_int = int(assignee_num)
-                                if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
-                                    is_assigned = True
-                                    logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
-                                    break
-                            except (ValueError, TypeError):
-                                continue
-                        else:
-                            # Попробуем как число
-                            try:
-                                assignee_num_int = int(assignee_id)
-                                if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
-                                    is_assigned = True
-                                    logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
-                                    break
-                            except (ValueError, TypeError):
-                                continue
-                    elif isinstance(assignee_id, int):
-                        # Если ID без префикса, проверяем как user
-                        if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
-                            is_assigned = True
-                            logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
-                            break
-                
-                if is_assigned:
-                    tasks.append(task)
-                else:
-                    logger.debug(f"Task {task_id} not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees)")
-            
-            logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
-        else:
-            # Если нет planfix_user_id, получаем задачи из TaskAssignment
-            from db_manager import DBManager
-            sync_db_manager = DBManager()
-            
-            with sync_db_manager.get_db() as db:
-                from database import TaskAssignment
-                assignments = db.query(TaskAssignment).filter(
-                    TaskAssignment.executor_telegram_id == executor_id,
-                    TaskAssignment.status == "active"
-                ).all()
-                
-                if assignments:
-                    # Получаем детали задач из Planfix API
-                    from planfix_client import planfix_client
-                    for assignment in assignments:
-                        try:
-                            task_response = await planfix_client.get_task_by_id(
-                                assignment.task_id,
-                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees"
-                            )
-                            if task_response and task_response.get('result') == 'success':
-                                task = task_response.get('task', {})
-                                if task:
-                                    # Проверяем статус задачи
-                                    task_status = task.get('status', {})
-                                    task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
-                                    if task_status_id in working_status_ids:
-                                        tasks.append(task)
-                        except Exception as e:
-                            logger.debug(f"Error fetching task {assignment.task_id}: {e}")
+                # Преобразуем TaskCache в формат, похожий на ответ API
+                for cached_task in cached_tasks:
+                    task_dict = {
+                        'id': cached_task.task_id,
+                        'name': cached_task.name or 'Без названия',
+                        'status': {
+                            'id': cached_task.status_id,
+                            'name': cached_task.status_name or 'Неизвестно'
+                        },
+                        'counterparty': {
+                            'id': cached_task.counterparty_id
+                        } if cached_task.counterparty_id else {},
+                        'dateTime': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None,
+                        'dateOfLastUpdate': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None
+                    }
+                    tasks.append(task_dict)
         
         if not tasks:
             executor_name = executor.full_name or f"ID: {executor_id}"
@@ -736,6 +637,66 @@ async def admin_sync_tasks(message: Message, state: FSMContext):
                                     
                                     total_synced += 1
                                     
+                                    # Создаем записи в TaskAssignment для всех назначенных исполнителей
+                                    try:
+                                        from database import TaskAssignment, ExecutorProfile
+                                        assignees = task.get('assignees', {})
+                                        if isinstance(assignees, dict):
+                                            assignee_users = assignees.get('users', []) or []
+                                            assignee_contacts = assignees.get('contacts', []) or []
+                                            
+                                            # Собираем все назначенные ID (users и contacts)
+                                            assigned_ids = set()
+                                            for user in assignee_users:
+                                                if isinstance(user, dict):
+                                                    user_id = user.get('id')
+                                                    if user_id:
+                                                        if isinstance(user_id, str) and ':' in user_id:
+                                                            assigned_ids.add(user_id.split(':')[-1])
+                                                        else:
+                                                            assigned_ids.add(str(user_id))
+                                            
+                                            for contact in assignee_contacts:
+                                                if isinstance(contact, dict):
+                                                    contact_id = contact.get('id')
+                                                    if contact_id:
+                                                        if isinstance(contact_id, str) and ':' in contact_id:
+                                                            assigned_ids.add(contact_id.split(':')[-1])
+                                                        else:
+                                                            assigned_ids.add(str(contact_id))
+                                            
+                                            # Находим исполнителей по planfix_user_id или planfix_contact_id
+                                            if assigned_ids:
+                                                executors = db.query(ExecutorProfile).filter(
+                                                    ExecutorProfile.profile_status == "активен"
+                                                ).all()
+                                                
+                                                for executor in executors:
+                                                    executor_user_id = str(executor.planfix_user_id) if executor.planfix_user_id else None
+                                                    executor_contact_id = str(executor.planfix_contact_id) if executor.planfix_contact_id else None
+                                                    
+                                                    # Проверяем, назначен ли исполнитель
+                                                    if (executor_user_id and executor_user_id in assigned_ids) or \
+                                                       (executor_contact_id and executor_contact_id in assigned_ids):
+                                                        # Проверяем, нет ли уже активного назначения
+                                                        existing = db.query(TaskAssignment).filter(
+                                                            TaskAssignment.task_id == task_id,
+                                                            TaskAssignment.executor_telegram_id == executor.telegram_id,
+                                                            TaskAssignment.status == "active"
+                                                        ).first()
+                                                        
+                                                        if not existing:
+                                                            assignment = TaskAssignment(
+                                                                task_id=task_id,
+                                                                executor_telegram_id=executor.telegram_id,
+                                                                planfix_user_id=executor.planfix_user_id,
+                                                                status="active"
+                                                            )
+                                                            db.add(assignment)
+                                                            logger.debug(f"Created TaskAssignment: task {task_id} -> executor {executor.telegram_id}")
+                                    except Exception as assign_err:
+                                        logger.warning(f"Error creating TaskAssignment for task {task.get('id')}: {assign_err}")
+                                    
                                 except Exception as task_err:
                                     logger.error(f"Error processing task {task.get('id')}: {task_err}", exc_info=True)
                                     total_errors += 1
@@ -918,6 +879,66 @@ async def admin_sync_tasks_without_template(message: Message, state: FSMContext)
                                     continue
                                 
                                 total_with_executor += 1
+                                
+                                # Создаем записи в TaskAssignment для всех назначенных исполнителей
+                                try:
+                                    from database import TaskAssignment, ExecutorProfile
+                                    assignees = task.get('assignees', {})
+                                    if isinstance(assignees, dict):
+                                        assignee_users = assignees.get('users', []) or []
+                                        assignee_contacts = assignees.get('contacts', []) or []
+                                        
+                                        # Собираем все назначенные ID (users и contacts)
+                                        assigned_ids = set()
+                                        for user in assignee_users:
+                                            if isinstance(user, dict):
+                                                user_id = user.get('id')
+                                                if user_id:
+                                                    if isinstance(user_id, str) and ':' in user_id:
+                                                        assigned_ids.add(user_id.split(':')[-1])
+                                                    else:
+                                                        assigned_ids.add(str(user_id))
+                                        
+                                        for contact in assignee_contacts:
+                                            if isinstance(contact, dict):
+                                                contact_id = contact.get('id')
+                                                if contact_id:
+                                                    if isinstance(contact_id, str) and ':' in contact_id:
+                                                        assigned_ids.add(contact_id.split(':')[-1])
+                                                    else:
+                                                        assigned_ids.add(str(contact_id))
+                                        
+                                        # Находим исполнителей по planfix_user_id или planfix_contact_id
+                                        if assigned_ids:
+                                            executors = db.query(ExecutorProfile).filter(
+                                                ExecutorProfile.profile_status == "активен"
+                                            ).all()
+                                            
+                                            for executor in executors:
+                                                executor_user_id = str(executor.planfix_user_id) if executor.planfix_user_id else None
+                                                executor_contact_id = str(executor.planfix_contact_id) if executor.planfix_contact_id else None
+                                                
+                                                # Проверяем, назначен ли исполнитель
+                                                if (executor_user_id and executor_user_id in assigned_ids) or \
+                                                   (executor_contact_id and executor_contact_id in assigned_ids):
+                                                    # Проверяем, нет ли уже активного назначения
+                                                    existing = db.query(TaskAssignment).filter(
+                                                        TaskAssignment.task_id == task_id,
+                                                        TaskAssignment.executor_telegram_id == executor.telegram_id,
+                                                        TaskAssignment.status == "active"
+                                                    ).first()
+                                                    
+                                                    if not existing:
+                                                        assignment = TaskAssignment(
+                                                            task_id=task_id,
+                                                            executor_telegram_id=executor.telegram_id,
+                                                            planfix_user_id=executor.planfix_user_id,
+                                                            status="active"
+                                                        )
+                                                        db.add(assignment)
+                                                        logger.debug(f"Created TaskAssignment: task {task_id} -> executor {executor.telegram_id}")
+                                except Exception as assign_err:
+                                    logger.warning(f"Error creating TaskAssignment for task {task.get('id')}: {assign_err}")
                                 
                                 # Извлекаем данные задачи
                                 task_name = task.get('name', '')
@@ -1533,9 +1554,12 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
         
         tasks = []
         
-        # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально
-        from planfix_client import planfix_client
+        # Ищем задачи в БД бота (TaskCache) через TaskAssignment
+        from db_manager import DBManager
+        from database import TaskAssignment, TaskCache
         from services.status_registry import StatusKey, collect_status_ids, require_status_id
+        
+        sync_db_manager = DBManager()
         
         # Получаем статусы "Новая" и "В работе"
         working_status_ids = collect_status_ids(
@@ -1561,163 +1585,43 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             )
             return
         
-        # Получаем все задачи для каждого статуса (без фильтра по исполнителю)
-        all_tasks = []
-        for status_id in working_status_ids:
-            if status_id is None:
-                continue
+        with sync_db_manager.get_db() as db:
+            # Получаем все активные назначения для этого исполнителя
+            assignments = db.query(TaskAssignment).filter(
+                TaskAssignment.executor_telegram_id == executor_id,
+                TaskAssignment.status == "active"
+            ).all()
             
-            filters = [
-                {
-                    "type": 10,  # Task status
-                    "operator": "equal",
-                    "value": status_id
-                }
-            ]
+            logger.info(f"Found {len(assignments)} active task assignments for executor {executor_id}")
             
-            try:
-                # Запрашиваем ВСЕ задачи с пагинацией, чтобы найти все назначенные
-                page_size = 100
-                offset = 0
-                max_pages = 20  # Максимум 20 страниц (2000 задач) для каждого статуса
+            if assignments:
+                # Получаем task_id из назначений
+                task_ids = [assignment.task_id for assignment in assignments]
                 
-                while offset < max_pages * page_size:
-                    response = await planfix_client.get_task_list(
-                        filters=filters,
-                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
-                        page_size=page_size,
-                        offset=offset
-                    )
-                    
-                    if response and response.get('result') == 'success':
-                        tasks_list = response.get('tasks', [])
-                        if tasks_list:
-                            all_tasks.extend(tasks_list)
-                            logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id} (offset={offset}, total so far: {len(all_tasks)})")
-                            
-                            # Если получили меньше задач, чем page_size, значит это последняя страница
-                            if len(tasks_list) < page_size:
-                                break
-                        else:
-                            # Нет задач на этой странице, прекращаем
-                            break
-                    else:
-                        logger.warning(f"Failed to fetch tasks with status {status_id} at offset {offset}: {response}")
-                        break
-                    
-                    offset += page_size
-                    
-            except Exception as e:
-                logger.error(f"Error fetching tasks with status {status_id}: {e}")
-        
-        # Фильтруем задачи по назначенным исполнителям
-        if executor_planfix_id and executor_planfix_id_type:
-            logger.info(f"Filtering tasks by executor {executor_planfix_id_type}:{executor_planfix_id} from {len(all_tasks)} total tasks")
-            for task in all_tasks:
-                task_id = task.get('id')
+                # Получаем задачи из TaskCache
+                cached_tasks = db.query(TaskCache).filter(
+                    TaskCache.task_id.in_(task_ids),
+                    TaskCache.status_id.in_(working_status_ids)
+                ).order_by(TaskCache.date_of_last_update.desc().nullslast()).all()
                 
-                # Специальная проверка для задачи 85968 (для диагностики)
-                if task_id == 85968:
-                    logger.info(f"🔍 Found task 85968! Full task data: {json.dumps(task, indent=2, ensure_ascii=False)}")
+                logger.info(f"Found {len(cached_tasks)} tasks in TaskCache for executor {executor_id} with statuses {working_status_ids}")
                 
-                assignees = task.get('assignees', {}) or {}
-                
-                # Проверяем всех назначенных: users, contacts, groups
-                assignee_users = assignees.get('users', []) or []
-                assignee_contacts = assignees.get('contacts', []) or []
-                assignee_groups = assignees.get('groups', []) or []
-                
-                # Объединяем всех назначенных в один список для проверки
-                all_assignees = assignee_users + assignee_contacts + assignee_groups
-                
-                # Специальная проверка для задачи 85968
-                if task_id == 85968:
-                    logger.info(f"🔍 Task 85968 assignees: users={assignee_users}, contacts={assignee_contacts}, groups={assignee_groups}")
-                    logger.info(f"🔍 Looking for executor {executor_planfix_id_type}:{executor_planfix_id}")
-                
-                is_assigned = False
-                for assignee in all_assignees:
-                    if not isinstance(assignee, dict):
-                        continue
-                    
-                    assignee_id = assignee.get('id', '')
-                    if not assignee_id:
-                        continue
-                    
-                    if isinstance(assignee_id, str):
-                        # Может быть "user:123" или "contact:123"
-                        if ':' in assignee_id:
-                            assignee_type, assignee_num = assignee_id.split(':', 1)
-                            try:
-                                assignee_num_int = int(assignee_num)
-                                if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
-                                    is_assigned = True
-                                    logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
-                                    if task_id == 85968:
-                                        logger.info(f"🔍 Task 85968 MATCHED! Found {assignee_type}:{assignee_num_int}")
-                                    break
-                            except (ValueError, TypeError):
-                                continue
-                        else:
-                            # Попробуем как число
-                            try:
-                                assignee_num_int = int(assignee_id)
-                                if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
-                                    is_assigned = True
-                                    logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
-                                    if task_id == 85968:
-                                        logger.info(f"🔍 Task 85968 MATCHED! Found user:{assignee_num_int}")
-                                    break
-                            except (ValueError, TypeError):
-                                continue
-                    elif isinstance(assignee_id, int):
-                        # Если ID без префикса, проверяем как user
-                        if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
-                            is_assigned = True
-                            logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
-                            if task_id == 85968:
-                                logger.info(f"🔍 Task 85968 MATCHED! Found user:{assignee_id}")
-                            break
-                
-                if is_assigned:
-                    tasks.append(task)
-                else:
-                    if task_id == 85968:
-                        logger.warning(f"🔍 Task 85968 NOT matched! Executor {executor_planfix_id_type}:{executor_planfix_id} not found in {len(all_assignees)} assignees")
-                    logger.debug(f"Task {task_id} not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees)")
-            
-            logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
-        else:
-            # Если нет planfix_user_id, получаем задачи из TaskAssignment
-            from db_manager import DBManager
-            sync_db_manager = DBManager()
-            
-            with sync_db_manager.get_db() as db:
-                from database import TaskAssignment
-                assignments = db.query(TaskAssignment).filter(
-                    TaskAssignment.executor_telegram_id == executor_id,
-                    TaskAssignment.status == "active"
-                ).all()
-                
-                if assignments:
-                    # Получаем детали задач из Planfix API
-                    from planfix_client import planfix_client
-                    for assignment in assignments:
-                        try:
-                            task_response = await planfix_client.get_task_by_id(
-                                assignment.task_id,
-                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees"
-                            )
-                            if task_response and task_response.get('result') == 'success':
-                                task = task_response.get('task', {})
-                                if task:
-                                    # Проверяем статус задачи
-                                    task_status = task.get('status', {})
-                                    task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
-                                    if task_status_id in working_status_ids:
-                                        tasks.append(task)
-                        except Exception as e:
-                            logger.debug(f"Error fetching task {assignment.task_id}: {e}")
+                # Преобразуем TaskCache в формат, похожий на ответ API
+                for cached_task in cached_tasks:
+                    task_dict = {
+                        'id': cached_task.task_id,
+                        'name': cached_task.name or 'Без названия',
+                        'status': {
+                            'id': cached_task.status_id,
+                            'name': cached_task.status_name or 'Неизвестно'
+                        },
+                        'counterparty': {
+                            'id': cached_task.counterparty_id
+                        } if cached_task.counterparty_id else {},
+                        'dateTime': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None,
+                        'dateOfLastUpdate': cached_task.date_of_last_update.isoformat() if cached_task.date_of_last_update else None
+                    }
+                    tasks.append(task_dict)
         
         if not tasks:
             executor_name = executor.full_name or f"ID: {executor_id}"

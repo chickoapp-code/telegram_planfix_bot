@@ -363,6 +363,14 @@ class PlanfixWebhookHandler:
             if status_id:
                 self._task_status_cache[task_id] = status_id
             
+            # Обрабатываем назначения исполнителей при создании задачи
+            assignees = task.get('assignees', {})
+            if isinstance(assignees, dict):
+                assignee_users = assignees.get('users', []) or []
+                assignee_contacts = assignees.get('contacts', []) or []
+                if assignee_users or assignee_contacts:
+                    await self._handle_task_assignments(task_id, assignee_users, assignee_contacts)
+            
             await self.notification_service.notify_new_task(task_id, project_id)
                 
         except Exception as e:
@@ -763,9 +771,10 @@ class PlanfixWebhookHandler:
                 if status_in(new_status_id, (StatusKey.COMPLETED, StatusKey.FINISHED)):
                     await self._handle_task_completed(task_id, new_status_id)
             
-            # Обрабатываем назначения исполнителей
-            if assignee_users:
-                await self._handle_task_assignments(task_id, assignee_users)
+            # Обрабатываем назначения исполнителей (users и contacts)
+            assignee_contacts = assignees.get('contacts', []) if isinstance(assignees, dict) else []
+            if assignee_users or assignee_contacts:
+                await self._handle_task_assignments(task_id, assignee_users or [], assignee_contacts)
                         
         except Exception as e:
             logger.error(f"Error handling task updated: {e}", exc_info=True)
@@ -807,8 +816,8 @@ class PlanfixWebhookHandler:
         except Exception as e:
             logger.error(f"Error handling comment added: {e}", exc_info=True)
     
-    async def _handle_task_assignments(self, task_id: int, assignee_users: list):
-        """Обрабатывает назначения исполнителей на задачу."""
+    async def _handle_task_assignments(self, task_id: int, assignee_users: list, assignee_contacts: list = None):
+        """Обрабатывает назначения исполнителей на задачу (поддерживает несколько исполнителей)."""
         try:
             with self.db_manager.get_db() as db:
                 from database import TaskAssignment, ExecutorProfile
@@ -822,28 +831,55 @@ class PlanfixWebhookHandler:
                     ).all()
                 }
                 
-                # Получаем назначенных пользователей из webhook
+                # Получаем назначенных пользователей и контактов из webhook
                 assigned_user_ids = set()
-                for user in assignee_users:
-                    # Проверяем, что user - это словарь
+                assigned_contact_ids = set()
+                
+                # Обрабатываем users
+                for user in assignee_users or []:
                     if isinstance(user, dict):
                         user_id = self._normalize_user_id(user.get('id'))
                         if user_id:
-                            assigned_user_ids.add(user_id)
+                            assigned_user_ids.add(str(user_id))
                     elif isinstance(user, str):
-                        # Если user - это строка, пытаемся нормализовать её как ID
                         user_id = self._normalize_user_id(user)
                         if user_id:
-                            assigned_user_ids.add(user_id)
+                            assigned_user_ids.add(str(user_id))
                 
-                # Находим исполнителей по planfix_user_id
+                # Обрабатываем contacts
+                for contact in assignee_contacts or []:
+                    if isinstance(contact, dict):
+                        contact_id = self._normalize_user_id(contact.get('id'))
+                        if contact_id:
+                            assigned_contact_ids.add(str(contact_id))
+                    elif isinstance(contact, str):
+                        contact_id = self._normalize_user_id(contact)
+                        if contact_id:
+                            assigned_contact_ids.add(str(contact_id))
+                
+                # Объединяем все назначенные ID
+                all_assigned_ids = assigned_user_ids | assigned_contact_ids
+                
+                # Находим исполнителей по planfix_user_id И planfix_contact_id
                 executors = db.query(ExecutorProfile).filter(
-                    ExecutorProfile.planfix_user_id.in_(assigned_user_ids),
                     ExecutorProfile.profile_status == "активен"
                 ).all()
                 
-                # Создаем новые назначения
+                # Фильтруем исполнителей, которые назначены на задачу
+                matching_executors = []
                 for executor in executors:
+                    executor_user_id = str(executor.planfix_user_id) if executor.planfix_user_id else None
+                    executor_contact_id = str(executor.planfix_contact_id) if executor.planfix_contact_id else None
+                    
+                    # Проверяем, назначен ли исполнитель (по user_id или contact_id)
+                    if (executor_user_id and executor_user_id in all_assigned_ids) or \
+                       (executor_contact_id and executor_contact_id in all_assigned_ids):
+                        matching_executors.append(executor)
+                
+                logger.info(f"Found {len(matching_executors)} executors assigned to task {task_id} (user_ids: {assigned_user_ids}, contact_ids: {assigned_contact_ids})")
+                
+                # Создаем новые назначения для ВСЕХ найденных исполнителей
+                for executor in matching_executors:
                     key = (task_id, executor.telegram_id)
                     if key not in existing_assignments:
                         # Создаем новое назначение
@@ -854,18 +890,27 @@ class PlanfixWebhookHandler:
                             status="active"
                         )
                         db.add(assignment)
-                        logger.info(f"✅ Created TaskAssignment: task {task_id} -> executor {executor.telegram_id}")
+                        logger.info(f"✅ Created TaskAssignment: task {task_id} -> executor {executor.telegram_id} (planfix_user_id: {executor.planfix_user_id}, planfix_contact_id: {executor.planfix_contact_id})")
                 
                 # Деактивируем назначения для исполнителей, которые больше не назначены
                 for key, assignment in existing_assignments.items():
                     executor = db.query(ExecutorProfile).filter(
                         ExecutorProfile.telegram_id == assignment.executor_telegram_id
                     ).first()
-                    if not executor or executor.planfix_user_id not in assigned_user_ids:
+                    if not executor:
                         assignment.status = "cancelled"
-                        logger.info(f"❌ Deactivated TaskAssignment: task {task_id} -> executor {assignment.executor_telegram_id}")
+                        logger.info(f"❌ Deactivated TaskAssignment: task {task_id} -> executor {assignment.executor_telegram_id} (executor not found)")
+                    else:
+                        executor_user_id = str(executor.planfix_user_id) if executor.planfix_user_id else None
+                        executor_contact_id = str(executor.planfix_contact_id) if executor.planfix_contact_id else None
+                        
+                        # Проверяем, назначен ли исполнитель еще
+                        if (executor_user_id not in all_assigned_ids) and (executor_contact_id not in all_assigned_ids):
+                            assignment.status = "cancelled"
+                            logger.info(f"❌ Deactivated TaskAssignment: task {task_id} -> executor {assignment.executor_telegram_id} (no longer assigned)")
                 
                 db.commit()
+                logger.info(f"✅ Task assignments updated for task {task_id}: {len(matching_executors)} active executors")
         except Exception as e:
             logger.error(f"Error handling task assignments for task {task_id}: {e}", exc_info=True)
     
