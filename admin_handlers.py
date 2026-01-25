@@ -1400,6 +1400,37 @@ async def admin_view_task_details(callback_query: CallbackQuery, state: FSMConte
                 assignee_name = assignee.get('name', 'Неизвестно')
                 assignees_list.append(assignee_name)
         
+        # Получаем чек-лист задачи
+        checklist_text = ""
+        try:
+            checklist_response = await planfix_client.get_task_checklist(task_id)
+            if checklist_response and checklist_response.get('result') == 'success':
+                # Проверяем разные возможные структуры ответа
+                checklist_items = (
+                    checklist_response.get('checklist', []) or 
+                    checklist_response.get('items', []) or 
+                    checklist_response.get('data', {}).get('checklist', []) or
+                    []
+                )
+                if checklist_items:
+                    checklist_lines = ["\n\n✅ <b>Чек-лист:</b>"]
+                    for item in checklist_items:
+                        if isinstance(item, dict):
+                            item_name = item.get('name', '') or item.get('text', '') or item.get('title', 'Без названия')
+                            is_checked = (
+                                item.get('isChecked', False) or 
+                                item.get('checked', False) or 
+                                item.get('is_checked', False) or
+                                item.get('status') == 'checked' or
+                                item.get('status') == 'completed'
+                            )
+                            checkbox = "☑️" if is_checked else "☐"
+                            checklist_lines.append(f"{checkbox} {item_name}")
+                    if len(checklist_lines) > 1:  # Если есть хотя бы один пункт
+                        checklist_text = "\n".join(checklist_lines)
+        except Exception as checklist_err:
+            logger.debug(f"Error getting checklist for task {task_id}: {checklist_err}")
+        
         task_text = (
             f"📋 <b>Заявка #{task_id}</b>\n\n"
             f"📝 <b>Название:</b> {task_name}\n"
@@ -1412,6 +1443,8 @@ async def admin_view_task_details(callback_query: CallbackQuery, state: FSMConte
         
         if assignees_list:
             task_text += f"👷 <b>Исполнители:</b> {', '.join(assignees_list)}\n"
+        
+        task_text += checklist_text
         
         # Получаем информацию о пользователе, создавшем заявку
         from db_manager import DBManager

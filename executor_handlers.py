@@ -3167,6 +3167,37 @@ async def show_task_details(message: Message, state: FSMContext):
         if "отлож" in _sn or "paused" in _sn:
             status_display_name = "Отложенная"
         
+        # Получаем чек-лист задачи
+        checklist_text = ""
+        try:
+            checklist_response = await planfix_client.get_task_checklist(task_id)
+            if checklist_response and checklist_response.get('result') == 'success':
+                # Проверяем разные возможные структуры ответа
+                checklist_items = (
+                    checklist_response.get('checklist', []) or 
+                    checklist_response.get('items', []) or 
+                    checklist_response.get('data', {}).get('checklist', []) or
+                    []
+                )
+                if checklist_items:
+                    checklist_lines = ["\n\n✅ <b>Чек-лист:</b>"]
+                    for item in checklist_items:
+                        if isinstance(item, dict):
+                            item_name = item.get('name', '') or item.get('text', '') or item.get('title', 'Без названия')
+                            is_checked = (
+                                item.get('isChecked', False) or 
+                                item.get('checked', False) or 
+                                item.get('is_checked', False) or
+                                item.get('status') == 'checked' or
+                                item.get('status') == 'completed'
+                            )
+                            checkbox = "☑️" if is_checked else "☐"
+                            checklist_lines.append(f"{checkbox} {item_name}")
+                    if len(checklist_lines) > 1:  # Если есть хотя бы один пункт
+                        checklist_text = "\n".join(checklist_lines)
+        except Exception as checklist_err:
+            logger.debug(f"Error getting checklist for task {task_id}: {checklist_err}")
+        
         message_text = (
             f"📋 Задача #{task_id}\n\n"
             f"📝 {task_name}\n\n"
@@ -3176,6 +3207,7 @@ async def show_task_details(message: Message, state: FSMContext):
             f"👤 Заявитель: {contact_name}\n"
             f"📱 Телефон: {phone}\n\n"
             f"📄 Описание:\n{description[:500]}"
+            f"{checklist_text}"
         )
         
         # Сохраняем ID задачи в состояние
@@ -3200,7 +3232,8 @@ async def show_task_details(message: Message, state: FSMContext):
 
         await message.answer(
             message_text,
-            reply_markup=reply_kb
+            reply_markup=reply_kb,
+            parse_mode="HTML"
         )
         
         # Отправляем файлы как медиа (как у заявителей) - работа в памяти, без сохранения на диск

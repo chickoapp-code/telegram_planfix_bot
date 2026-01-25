@@ -1165,6 +1165,20 @@ class PlanfixAPIClient:
             return {}
 
     # ============================================================================
+    # CHECKLIST
+    # ============================================================================
+
+    async def get_task_checklist(self, task_id: int):
+        """Получает чек-лист задачи из Planfix."""
+        endpoint = f"/task/{task_id}/checklist/list"
+        try:
+            data = await self._request("GET", endpoint)
+            return data
+        except Exception as e:
+            logger.error(f"Failed to get checklist for task {task_id}: {e}")
+            return {}
+
+    # ============================================================================
     # COMMENTS
     # ============================================================================
 
