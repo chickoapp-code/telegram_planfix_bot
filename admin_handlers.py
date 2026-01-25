@@ -280,67 +280,95 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
         
         tasks = []
         
-        if executor_planfix_id and executor_planfix_id_type:
-            # Получаем задачи через Planfix API по фильтру назначенных исполнителей
-            from planfix_client import planfix_client
-            from services.status_registry import StatusKey, collect_status_ids, require_status_id
-            
-            # Получаем статусы "Новая" и "В работе"
-            working_status_ids = collect_status_ids(
-                (StatusKey.NEW, StatusKey.IN_PROGRESS),
-                required=False,
-            )
-            if not working_status_ids:
-                try:
-                    working_status_ids = [
-                        require_status_id(StatusKey.NEW),
-                        require_status_id(StatusKey.IN_PROGRESS)
-                    ]
-                    working_status_ids = [sid for sid in working_status_ids if sid is not None]
-                except Exception:
-                    working_status_ids = []
-            
-            # Запрашиваем задачи для каждого статуса
-            for status_id in working_status_ids:
-                if status_id is None:
-                    continue
-                
-                filters = [
-                    {
-                        "type": 2,  # Task assignee
-                        "operator": "equal",
-                        "value": f"{executor_planfix_id_type}:{executor_planfix_id}"
-                    },
-                    {
-                        "type": 10,  # Task status
-                        "operator": "equal",
-                        "value": status_id
-                    }
+        # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально
+        from planfix_client import planfix_client
+        from services.status_registry import StatusKey, collect_status_ids, require_status_id
+        
+        # Получаем статусы "Новая" и "В работе"
+        working_status_ids = collect_status_ids(
+            (StatusKey.NEW, StatusKey.IN_PROGRESS),
+            required=False,
+        )
+        if not working_status_ids:
+            try:
+                working_status_ids = [
+                    require_status_id(StatusKey.NEW),
+                    require_status_id(StatusKey.IN_PROGRESS)
                 ]
-                
-                try:
-                    response = await planfix_client.get_task_list(
-                        filters=filters,
-                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
-                        page_size=50
-                    )
-                    
-                    if response and response.get('result') == 'success':
-                        tasks_list = response.get('tasks', [])
-                        if tasks_list:
-                            tasks.extend(tasks_list)
-                except Exception as e:
-                    logger.error(f"Error fetching tasks for executor {executor_id}: {e}")
+                working_status_ids = [sid for sid in working_status_ids if sid is not None]
+            except Exception:
+                working_status_ids = []
+        
+        if not working_status_ids:
+            await message.answer(
+                f"❌ Не удалось получить ID статусов. Проверьте настройки.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем все задачи для каждого статуса (без фильтра по исполнителю)
+        all_tasks = []
+        for status_id in working_status_ids:
+            if status_id is None:
+                continue
             
-            # Убираем дубликаты
-            seen_task_ids = set()
-            unique_tasks = []
-            for task in tasks:
+            filters = [
+                {
+                    "type": 10,  # Task status
+                    "operator": "equal",
+                    "value": status_id
+                }
+            ]
+            
+            try:
+                # Запрашиваем больше задач, чтобы найти все назначенные
+                response = await planfix_client.get_task_list(
+                    filters=filters,
+                    fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
+                    page_size=100,
+                    offset=0
+                )
+                
+                if response and response.get('result') == 'success':
+                    tasks_list = response.get('tasks', [])
+                    if tasks_list:
+                        all_tasks.extend(tasks_list)
+                        logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id}")
+            except Exception as e:
+                logger.error(f"Error fetching tasks with status {status_id}: {e}")
+        
+        # Фильтруем задачи по назначенным исполнителям
+        if executor_planfix_id and executor_planfix_id_type:
+            logger.info(f"Filtering tasks by executor {executor_planfix_id_type}:{executor_planfix_id} from {len(all_tasks)} total tasks")
+            for task in all_tasks:
                 task_id = task.get('id')
-                if task_id and task_id not in seen_task_ids:
-                    seen_task_ids.add(task_id)
-                    unique_tasks.append(task)
-            tasks = unique_tasks
+                assignees = task.get('assignees', {}) or {}
+                assignee_users = assignees.get('users', []) or []
+                
+                is_assigned = False
+                for assignee in assignee_users:
+                    assignee_id = assignee.get('id', '')
+                    if isinstance(assignee_id, str):
+                        # Может быть "user:123" или "contact:123"
+                        if ':' in assignee_id:
+                            assignee_type, assignee_num = assignee_id.split(':', 1)
+                            try:
+                                assignee_num_int = int(assignee_num)
+                                if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
+                                    is_assigned = True
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                    elif isinstance(assignee_id, int):
+                        # Если ID без префикса, проверяем как user
+                        if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
+                            is_assigned = True
+                            break
+                
+                if is_assigned:
+                    tasks.append(task)
+            
+            logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
         else:
             # Если нет planfix_user_id, получаем задачи из TaskAssignment
             from db_manager import DBManager
@@ -360,12 +388,16 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
                         try:
                             task_response = await planfix_client.get_task_by_id(
                                 assignment.task_id,
-                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate"
+                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees"
                             )
                             if task_response and task_response.get('result') == 'success':
                                 task = task_response.get('task', {})
                                 if task:
-                                    tasks.append(task)
+                                    # Проверяем статус задачи
+                                    task_status = task.get('status', {})
+                                    task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
+                                    if task_status_id in working_status_ids:
+                                        tasks.append(task)
                         except Exception as e:
                             logger.debug(f"Error fetching task {assignment.task_id}: {e}")
         
@@ -374,7 +406,8 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             await message.answer(
                 f"📋 <b>Заявки исполнителя</b>\n\n"
                 f"👷 <b>{executor_name}</b> (ID: {executor_id})\n\n"
-                f"❌ У исполнителя нет назначенных заявок.",
+                f"❌ У исполнителя нет назначенных заявок со статусами 'Новая' или 'В работе'.\n\n"
+                f"Всего проверено задач: {len(all_tasks)}",
                 parse_mode="HTML"
             )
             return
@@ -951,67 +984,97 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
         
         tasks = []
         
-        if executor_planfix_id and executor_planfix_id_type:
-            # Получаем задачи через Planfix API по фильтру назначенных исполнителей
-            from planfix_client import planfix_client
-            from services.status_registry import StatusKey, collect_status_ids, require_status_id
-            
-            # Получаем статусы "Новая" и "В работе"
-            working_status_ids = collect_status_ids(
-                (StatusKey.NEW, StatusKey.IN_PROGRESS),
-                required=False,
-            )
-            if not working_status_ids:
-                try:
-                    working_status_ids = [
-                        require_status_id(StatusKey.NEW),
-                        require_status_id(StatusKey.IN_PROGRESS)
-                    ]
-                    working_status_ids = [sid for sid in working_status_ids if sid is not None]
-                except Exception:
-                    working_status_ids = []
-            
-            # Запрашиваем задачи для каждого статуса
-            for status_id in working_status_ids:
-                if status_id is None:
-                    continue
-                
-                filters = [
-                    {
-                        "type": 2,  # Task assignee
-                        "operator": "equal",
-                        "value": f"{executor_planfix_id_type}:{executor_planfix_id}"
-                    },
-                    {
-                        "type": 10,  # Task status
-                        "operator": "equal",
-                        "value": status_id
-                    }
+        # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально
+        from planfix_client import planfix_client
+        from services.status_registry import StatusKey, collect_status_ids, require_status_id
+        
+        # Получаем статусы "Новая" и "В работе"
+        working_status_ids = collect_status_ids(
+            (StatusKey.NEW, StatusKey.IN_PROGRESS),
+            required=False,
+        )
+        if not working_status_ids:
+            try:
+                working_status_ids = [
+                    require_status_id(StatusKey.NEW),
+                    require_status_id(StatusKey.IN_PROGRESS)
                 ]
-                
-                try:
-                    response = await planfix_client.get_task_list(
-                        filters=filters,
-                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate",
-                        page_size=50
-                    )
-                    
-                    if response and response.get('result') == 'success':
-                        tasks_list = response.get('tasks', [])
-                        if tasks_list:
-                            tasks.extend(tasks_list)
-                except Exception as e:
-                    logger.error(f"Error fetching tasks for executor {executor_id}: {e}")
+                working_status_ids = [sid for sid in working_status_ids if sid is not None]
+            except Exception:
+                working_status_ids = []
+        
+        if not working_status_ids:
+            logger.warning(f"Could not get status IDs for NEW and IN_PROGRESS")
+            executor_name = executor.full_name or f"ID: {executor_id}"
+            await callback_query.message.answer(
+                f"❌ Не удалось получить ID статусов. Проверьте настройки.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем все задачи для каждого статуса (без фильтра по исполнителю)
+        all_tasks = []
+        for status_id in working_status_ids:
+            if status_id is None:
+                continue
             
-            # Убираем дубликаты
-            seen_task_ids = set()
-            unique_tasks = []
-            for task in tasks:
+            filters = [
+                {
+                    "type": 10,  # Task status
+                    "operator": "equal",
+                    "value": status_id
+                }
+            ]
+            
+            try:
+                # Запрашиваем больше задач, чтобы найти все назначенные
+                response = await planfix_client.get_task_list(
+                    filters=filters,
+                    fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
+                    page_size=100,
+                    offset=0
+                )
+                
+                if response and response.get('result') == 'success':
+                    tasks_list = response.get('tasks', [])
+                    if tasks_list:
+                        all_tasks.extend(tasks_list)
+                        logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id}")
+            except Exception as e:
+                logger.error(f"Error fetching tasks with status {status_id}: {e}")
+        
+        # Фильтруем задачи по назначенным исполнителям
+        if executor_planfix_id and executor_planfix_id_type:
+            logger.info(f"Filtering tasks by executor {executor_planfix_id_type}:{executor_planfix_id} from {len(all_tasks)} total tasks")
+            for task in all_tasks:
                 task_id = task.get('id')
-                if task_id and task_id not in seen_task_ids:
-                    seen_task_ids.add(task_id)
-                    unique_tasks.append(task)
-            tasks = unique_tasks
+                assignees = task.get('assignees', {}) or {}
+                assignee_users = assignees.get('users', []) or []
+                
+                is_assigned = False
+                for assignee in assignee_users:
+                    assignee_id = assignee.get('id', '')
+                    if isinstance(assignee_id, str):
+                        # Может быть "user:123" или "contact:123"
+                        if ':' in assignee_id:
+                            assignee_type, assignee_num = assignee_id.split(':', 1)
+                            try:
+                                assignee_num_int = int(assignee_num)
+                                if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
+                                    is_assigned = True
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                    elif isinstance(assignee_id, int):
+                        # Если ID без префикса, проверяем как user
+                        if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
+                            is_assigned = True
+                            break
+                
+                if is_assigned:
+                    tasks.append(task)
+            
+            logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
         else:
             # Если нет planfix_user_id, получаем задачи из TaskAssignment
             from db_manager import DBManager
@@ -1031,12 +1094,16 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                         try:
                             task_response = await planfix_client.get_task_by_id(
                                 assignment.task_id,
-                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate"
+                                fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees"
                             )
                             if task_response and task_response.get('result') == 'success':
                                 task = task_response.get('task', {})
                                 if task:
-                                    tasks.append(task)
+                                    # Проверяем статус задачи
+                                    task_status = task.get('status', {})
+                                    task_status_id = task_status.get('id') if isinstance(task_status, dict) else None
+                                    if task_status_id in working_status_ids:
+                                        tasks.append(task)
                         except Exception as e:
                             logger.debug(f"Error fetching task {assignment.task_id}: {e}")
         

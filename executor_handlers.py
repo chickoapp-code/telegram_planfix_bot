@@ -1700,31 +1700,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         break
                     filters = []
 
-                    # Если у исполнителя есть planfix_user_id или planfix_contact_id, фильтруем по назначенным исполнителям
-                    if executor_planfix_id and executor_planfix_id_type:
-                        # Фильтр по исполнителю (type: 2 = Task assignee, согласно swagger.json)
-                        # Значение может быть "user:X" или "contact:X"
-                        assignee_value = f"{executor_planfix_id_type}:{executor_planfix_id}"
-                        filters.append({
-                            "type": 2,  # type 2 = Task assignee (исполнитель), type 1 = Task assigner (постановщик)
-                            "operator": "equal",
-                            "value": assignee_value
-                        })
-                        logger.debug(f"Added assignee filter (type 2): {assignee_value}")
-                        
-                        # Для назначенных задач также фильтруем по статусам "Новая" и "В работе"
-                        if working_status_ids:
-                            # Используем фильтр "in" для нескольких статусов (если API поддерживает)
-                            # Или делаем несколько запросов для каждого статуса
-                            # Пока используем первый статус, остальные обработаем в цикле
-                            if status_id is not None and status_id in working_status_ids:
-                                filters.append(
-                                    {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status
-                                )
-                    elif status_id is not None:
-                        # Старая логика: фильтр по статусу (если нет planfix_id)
+                    # Получаем ВСЕ задачи со статусами "Новая" и "В работе", затем фильтруем локально по назначенным исполнителям
+                    # Это более надежный способ, так как фильтр по назначенным исполнителям (type: 2) может не работать правильно
+                    if status_id is not None:
                         filters.append(
-                            {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status (not type 3 = Task auditor)
+                            {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status
                         )
                     
                     # Оптимизация: добавляем фильтр по дате на уровне API (только последние 30 дней для назначенных задач)
@@ -1802,6 +1782,36 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         task_id = task.get('id')
                         if not task_id or task_id in seen_task_ids:
                             continue
+
+                        # Если у исполнителя есть planfix_user_id или planfix_contact_id, проверяем назначение задачи
+                        if executor_planfix_id and executor_planfix_id_type:
+                            assignees = task.get('assignees', {}) or {}
+                            assignee_users = assignees.get('users', []) or []
+                            
+                            is_assigned = False
+                            for assignee in assignee_users:
+                                assignee_id = assignee.get('id', '')
+                                if isinstance(assignee_id, str):
+                                    # Может быть "user:123" или "contact:123"
+                                    if ':' in assignee_id:
+                                        assignee_type, assignee_num = assignee_id.split(':', 1)
+                                        try:
+                                            assignee_num_int = int(assignee_num)
+                                            if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
+                                                is_assigned = True
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+                                elif isinstance(assignee_id, int):
+                                    # Если ID без префикса, проверяем как user
+                                    if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
+                                        is_assigned = True
+                                        break
+                            
+                            # Пропускаем задачу, если она не назначена на этого исполнителя
+                            if not is_assigned:
+                                logger.debug(f"Task {task_id} is not assigned to executor {executor_planfix_id_type}:{executor_planfix_id}, skipping")
+                                continue
 
                         # Нормализуем task_id для использования в кеше
                         try:
