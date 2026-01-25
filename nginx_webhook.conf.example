@@ -18,21 +18,22 @@
 #    sudo systemctl reload nginx
 #
 # 6. Настройте в Planfix:
-#    URL: http://your-server-ip/planfix/webhook
+#    URL: http://crmbot.restme.pro/planfix/webhook
 #    Username: webhook_user
 #    Password: (пароль, который вы указали)
 
 server {
     listen 80;
-    # Если у вас есть домен, раскомментируйте и укажите:
-    # server_name your-domain.com;
+    server_name crmbot.restme.pro;
     
-    # Если используете HTTPS, раскомментируйте:
+    # Если используете HTTPS, раскомментируйте и настройте:
     # listen 443 ssl;
     # ssl_certificate /path/to/your/cert.pem;
     # ssl_certificate_key /path/to/your/key.pem;
+    # server_name crmbot.restme.pro;
     
     # Логирование (опционально, можно использовать общие логи)
+    # Если не нужны отдельные логи, закомментируйте эти строки
     access_log /var/log/nginx/webhook_access.log;
     error_log /var/log/nginx/webhook_error.log;
     

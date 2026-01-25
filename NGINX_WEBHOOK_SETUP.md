@@ -71,7 +71,7 @@ sudo systemctl reload nginx
 ## Настройка в Planfix
 
 В настройках webhook в Planfix укажите:
-- **URL:** `http://your-domain.com/planfix/webhook` (или `https://` для HTTPS)
+- **URL:** `http://crmbot.restme.pro/planfix/webhook` (или `https://` для HTTPS)
 - **Username:** `webhook_user` (или другой созданный пользователь)
 - **Password:** пароль, который вы указали при создании
 
@@ -81,10 +81,10 @@ sudo systemctl reload nginx
 
 ```bash
 # Без аутентификации (должен вернуть 401)
-curl -v http://your-domain.com/planfix/webhook
+curl -v http://crmbot.restme.pro/planfix/webhook
 
 # С правильной аутентификацией (должен вернуть 200 OK)
-curl -u webhook_user:your_password -X POST http://your-domain.com/planfix/webhook \
+curl -u webhook_user:your_password -X POST http://crmbot.restme.pro/planfix/webhook \
   -H "Content-Type: application/json" \
   -d '{"test": "data"}'
 ```
@@ -92,7 +92,7 @@ curl -u webhook_user:your_password -X POST http://your-domain.com/planfix/webhoo
 ### Тест health check:
 
 ```bash
-curl http://your-domain.com/health
+curl http://crmbot.restme.pro/health
 ```
 
 ## Безопасность
