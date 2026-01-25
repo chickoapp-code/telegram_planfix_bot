@@ -1526,16 +1526,63 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 f"serving_restaurants={executor.serving_restaurants}"
             )
 
-            # Показываем только задачи со статусом "Новая"
-            working_status_ids = _collect_status_ids(
-                (StatusKey.NEW,),
-                required=False,
-            )
-            if not working_status_ids:
+            # Получаем planfix_user_id или planfix_contact_id исполнителя для фильтрации
+            executor_planfix_id = None
+            executor_planfix_id_type = None  # "user" или "contact"
+            
+            if executor.planfix_user_id:
                 try:
-                    working_status_ids = [require_status_id(StatusKey.NEW)]
-                except Exception:
-                    working_status_ids = []
+                    executor_planfix_id = int(str(executor.planfix_user_id).split(':')[-1])
+                    executor_planfix_id_type = "user"
+                    logger.info(f"Using planfix_user_id {executor_planfix_id} for task filtering")
+                except (ValueError, TypeError):
+                    pass
+            
+            if not executor_planfix_id and executor.planfix_contact_id:
+                try:
+                    executor_planfix_id = int(str(executor.planfix_contact_id).split(':')[-1])
+                    executor_planfix_id_type = "contact"
+                    logger.info(f"Using planfix_contact_id {executor_planfix_id} for task filtering")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Если у исполнителя нет planfix_user_id или planfix_contact_id, используем старую логику
+            # (фильтрация по статусу "Новая" и другим параметрам)
+            if not executor_planfix_id:
+                logger.warning(
+                    f"Executor {executor.telegram_id} has no planfix_user_id or planfix_contact_id. "
+                    f"Will use old filtering logic (status=NEW only)."
+                )
+                # Показываем только задачи со статусом "Новая"
+                working_status_ids = _collect_status_ids(
+                    (StatusKey.NEW,),
+                    required=False,
+                )
+                if not working_status_ids:
+                    try:
+                        working_status_ids = [require_status_id(StatusKey.NEW)]
+                    except Exception:
+                        working_status_ids = []
+            else:
+                # Используем новую логику: получаем задачи, где исполнитель назначен
+                # Показываем только статусы "Новая" и "В работе"
+                working_status_ids = _collect_status_ids(
+                    (StatusKey.NEW, StatusKey.IN_PROGRESS),
+                    required=False,
+                )
+                if not working_status_ids:
+                    try:
+                        working_status_ids = [
+                            require_status_id(StatusKey.NEW),
+                            require_status_id(StatusKey.IN_PROGRESS)
+                        ]
+                        working_status_ids = [sid for sid in working_status_ids if sid is not None]
+                    except Exception:
+                        working_status_ids = []
+                logger.info(
+                    f"📊 Executor {executor.telegram_id} will query assigned tasks with statuses NEW or IN_PROGRESS "
+                    f"(using {executor_planfix_id_type}:{executor_planfix_id}, status_ids: {working_status_ids})"
+                )
 
             logger.info(
                 f"📊 Executor {executor.telegram_id} will query tasks with status_ids: {working_status_ids} (count: {len(working_status_ids) if working_status_ids else 0})"
@@ -1623,11 +1670,16 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 logger.debug(f"Unable to parse Planfix date value: {raw_value}")
                 return None
             
-            status_ids_to_query = working_status_ids if working_status_ids else []
-            
-            if not status_ids_to_query:
-                logger.warning("No working status IDs found, will query tasks without status filter")
-                status_ids_to_query = [None]
+            # Для назначенных задач запрашиваем каждый статус отдельно (NEW и IN_PROGRESS)
+            if executor_planfix_id and working_status_ids:
+                status_ids_to_query = working_status_ids
+                logger.info(f"Will query assigned tasks for each status: {status_ids_to_query}")
+            else:
+                status_ids_to_query = working_status_ids if working_status_ids else []
+                
+                if not status_ids_to_query:
+                    logger.warning("No working status IDs found, will query tasks without status filter")
+                    status_ids_to_query = [None]
 
             page_size = 50
             max_pages_per_status = 3  # Увеличиваем количество страниц, чтобы найти недавно созданные задачи
@@ -1648,14 +1700,37 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         break
                     filters = []
 
-                    if status_id is not None:
+                    # Если у исполнителя есть planfix_user_id или planfix_contact_id, фильтруем по назначенным исполнителям
+                    if executor_planfix_id and executor_planfix_id_type:
+                        # Фильтр по исполнителю (type: 2 = Task assignee, согласно swagger.json)
+                        # Значение может быть "user:X" или "contact:X"
+                        assignee_value = f"{executor_planfix_id_type}:{executor_planfix_id}"
+                        filters.append({
+                            "type": 2,  # type 2 = Task assignee (исполнитель), type 1 = Task assigner (постановщик)
+                            "operator": "equal",
+                            "value": assignee_value
+                        })
+                        logger.debug(f"Added assignee filter (type 2): {assignee_value}")
+                        
+                        # Для назначенных задач также фильтруем по статусам "Новая" и "В работе"
+                        if working_status_ids:
+                            # Используем фильтр "in" для нескольких статусов (если API поддерживает)
+                            # Или делаем несколько запросов для каждого статуса
+                            # Пока используем первый статус, остальные обработаем в цикле
+                            if status_id is not None and status_id in working_status_ids:
+                                filters.append(
+                                    {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status
+                                )
+                    elif status_id is not None:
+                        # Старая логика: фильтр по статусу (если нет planfix_id)
                         filters.append(
                             {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status (not type 3 = Task auditor)
                         )
                     
-                    # Оптимизация: добавляем фильтр по дате на уровне API (только последние 7 дней)
+                    # Оптимизация: добавляем фильтр по дате на уровне API (только последние 30 дней для назначенных задач)
                     # Формат даты для Planfix: "DD-MM-YYYY"
-                    date_from = (seven_days_ago.strftime("%d-%m-%Y"))
+                    days_back = 30 if executor_planfix_id else 7  # Для назначенных задач смотрим дальше
+                    date_from = ((datetime.now() - timedelta(days=days_back)).strftime("%d-%m-%Y"))
                     filters.append({
                         "type": 13,  # type 13 = Start date filter
                         "operator": "gt",  # greater than (больше чем)
@@ -1676,10 +1751,12 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     # ВАЖНО: Не используем кэш для API запросов, чтобы всегда получать актуальные статусы задач
                     # Это гарантирует, что завершенные задачи не будут показываться в списке
                     # Кэш может содержать устаревшие данные о статусах задач
-                    logger.debug(f"Fetching fresh task list from API (not using cache) to ensure accurate task statuses (status_id={status_id}, offset={offset})")
+                    logger.debug(f"Fetching fresh task list from API (not using cache) to ensure accurate task statuses (status_id={status_id}, offset={offset}, executor_filter={executor_planfix_id})")
+                    # Для назначенных задач запрашиваем также поле assignees для проверки
+                    fields = "id,name,description,status,template,counterparty,dateTime,tags,dataTags,project,assignees"
                     tasks_response = await planfix_client.get_task_list(
                         filters=filters,
-                        fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project",
+                        fields=fields,
                         page_size=page_size,
                         offset=offset,
                         result_order=[{"field": "dateTime", "direction": "Desc"}]
@@ -1771,8 +1848,42 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         template_id = _normalize_pf_id((task.get('template') or {}).get('id'))
                         counterparty_id = _normalize_pf_id((task.get('counterparty') or {}).get('id'))
 
-                        # Фильтруем по статусу
-                        if status_id is not None:
+                        # Если используем фильтр по назначенным исполнителям, проверяем assignees
+                        if executor_planfix_id and executor_planfix_id_type:
+                            # Проверяем, что задача действительно назначена на этого исполнителя
+                            assignees = task.get('assignees', {}) or {}
+                            assignee_users = assignees.get('users', []) or []
+                            
+                            is_assigned = False
+                            for assignee in assignee_users:
+                                assignee_id = assignee.get('id', '')
+                                if isinstance(assignee_id, str):
+                                    # Может быть "user:123" или "contact:123"
+                                    if ':' in assignee_id:
+                                        assignee_type, assignee_num = assignee_id.split(':', 1)
+                                        try:
+                                            assignee_num_int = int(assignee_num)
+                                            if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
+                                                is_assigned = True
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+                                elif isinstance(assignee_id, int):
+                                    # Если ID без префикса, проверяем как user
+                                    if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
+                                        is_assigned = True
+                                        break
+                            
+                            if not is_assigned:
+                                logger.debug(f"Task {task_id} filtered out: not assigned to executor {executor_planfix_id} ({executor_planfix_id_type})")
+                                continue
+                            
+                            # Для назначенных задач проверяем, что статус "Новая" или "В работе"
+                            if working_status_ids and task_status_id not in working_status_ids:
+                                logger.debug(f"Task {task_id} filtered out: status_id {task_status_id} not in allowed statuses {working_status_ids}")
+                                continue
+                        # Старая логика: фильтруем по статусу (если нет planfix_id)
+                        elif status_id is not None:
                             if task_status_id != status_id:
                                 continue
                         elif working_status_ids:
@@ -1780,7 +1891,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                 continue
                         
                         # ВАЖНО: Исключаем завершенные, отмененные и отклоненные задачи
-                        # Даже если они попали в запрос, не показываем их
+                        # Для всех задач (и назначенных, и неназначенных) показываем только "Новая" и "В работе"
                         try:
                             final_status_ids = _collect_status_ids(
                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
@@ -1840,8 +1951,15 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         )
 
                         # Фильтр по шаблонам (только если у исполнителя есть ограничения)
-                        # ВАЖНО: Фильтр применяется ВСЕГДА, даже для задач из BotLog
-                        if allowed_templates:
+                        # ВАЖНО: Для назначенных задач (executor_planfix_id) НЕ фильтруем по шаблону
+                        # Задачи, назначенные вручную в Planfix, показываются независимо от шаблона
+                        if executor_planfix_id:
+                            # Для назначенных задач не применяем фильтр по шаблону
+                            logger.debug(
+                                f"Task {task_id} is assigned to executor - skipping template filter "
+                                f"(template_id={template_id}, allowed_templates={allowed_templates})"
+                            )
+                        elif allowed_templates:
                             if template_id is None or template_id not in allowed_templates:
                                 logger.info(
                                     f"Task {task_id} filtered out by template filter: "
@@ -1856,12 +1974,19 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         # Фильтр по ресторанам (только если у исполнителя есть ограничения)
                         if allowed_restaurant_ids:
                             if counterparty_id is None or counterparty_id not in allowed_restaurant_ids:
-                                logger.info(
-                                    f"Task {task_id} filtered out by restaurant filter: "
-                                    f"counterparty_id={counterparty_id} not in allowed_restaurant_ids={allowed_restaurant_ids} "
-                                    f"(executor has {len(allowed_restaurant_ids)} restaurants)"
-                                )
-                                continue
+                                # Если задача назначена на исполнителя, показываем её даже если ресторан не соответствует
+                                if executor_planfix_id:
+                                    logger.debug(
+                                        f"Task {task_id} restaurant {counterparty_id} not in allowed_restaurant_ids, "
+                                        f"but task is assigned to executor - showing anyway"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Task {task_id} filtered out by restaurant filter: "
+                                        f"counterparty_id={counterparty_id} not in allowed_restaurant_ids={allowed_restaurant_ids} "
+                                        f"(executor has {len(allowed_restaurant_ids)} restaurants)"
+                                    )
+                                    continue
                         else:
                             # Если allowed_restaurant_ids пусто, значит исполнитель может видеть все рестораны
                             logger.debug(f"Task {task_id} passed restaurant filter (no restrictions)")
@@ -1870,16 +1995,24 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         
                         # Фильтр по тегам: если у исполнителя есть ограничения, задача ДОЛЖНА иметь соответствующий тег
                         # ИСКЛЮЧЕНИЕ: если шаблон правильный, но тега нет - показываем (для обратной совместимости)
+                        # ВАЖНО: Для назначенных задач (executor_planfix_id) фильтры менее строгие
                         if allowed_tag_names:
                             if task_tag_names:
                                 # У задачи есть теги - проверяем соответствие
                                 if not (task_tag_names & allowed_tag_names):
                                     # У задачи есть теги, но они не совпадают с разрешенными
-                                    logger.info(
-                                        f"Task {task_id} filtered out by tag filter: "
-                                        f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
-                                    )
-                                    continue
+                                    # Если задача назначена на исполнителя, показываем её даже если теги не соответствуют
+                                    if executor_planfix_id:
+                                        logger.debug(
+                                            f"Task {task_id} tags {task_tag_names} don't match allowed_tags, "
+                                            f"but task is assigned to executor - showing anyway"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Task {task_id} filtered out by tag filter: "
+                                            f"task_tags={task_tag_names} don't intersect with allowed_tags={allowed_tag_names}"
+                                        )
+                                        continue
                                 else:
                                     logger.debug(f"Task {task_id} passed tag filter: task_tags={task_tag_names} match allowed_tags={allowed_tag_names}")
                             else:
@@ -1891,12 +2024,20 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                         f"(backward compatibility for old tasks)"
                                     )
                                 else:
-                                    # Шаблон не соответствует, и тегов нет - отфильтровываем
-                                    logger.info(
-                                        f"Task {task_id} filtered out by tag filter: "
-                                        f"task has no tags and template_id={template_id} not in allowed_templates={allowed_templates}"
-                                    )
-                                    continue
+                                    # Шаблон не соответствует, и тегов нет
+                                    # Если задача назначена на исполнителя, показываем её даже если шаблон не соответствует
+                                    if executor_planfix_id:
+                                        logger.debug(
+                                            f"Task {task_id} has no tags and template_id={template_id} not in allowed_templates, "
+                                            f"but task is assigned to executor - showing anyway"
+                                        )
+                                    else:
+                                        # Шаблон не соответствует, и тегов нет - отфильтровываем
+                                        logger.info(
+                                            f"Task {task_id} filtered out by tag filter: "
+                                            f"task has no tags and template_id={template_id} not in allowed_templates={allowed_templates}"
+                                        )
+                                        continue
                         else:
                             # Если у исполнителя нет ограничений по тегам - пропускаем фильтр
                             logger.debug(f"Task {task_id} passed tag filter (executor has no tag restrictions)")
@@ -1921,6 +2062,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         break
                 
             # Фильтрация: показываем только заявки, созданные через бота
+            # НО: если задача назначена на исполнителя (executor_planfix_id), показываем все назначенные задачи
             # Используем BotLog для более надежной проверки
             def _is_bot_task(t):
                 task_id = t.get('id')
@@ -2006,10 +2148,39 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 return is_bot
             
             # Фильтрация по BotLog: показываем только заявки, созданные через бота
+            # НО: если задача назначена на исполнителя (executor_planfix_id), показываем все назначенные задачи
             before_bot_filter = len(all_new_tasks)
             filtered_tasks = []
             for t in all_new_tasks:
-                if _is_bot_task(t):
+                # Если задача назначена на исполнителя, показываем её независимо от того, создана ли она через бота
+                if executor_planfix_id:
+                    # Проверяем, что задача действительно назначена на этого исполнителя
+                    assignees = t.get('assignees', {}) or {}
+                    assignee_users = assignees.get('users', []) or []
+                    is_assigned_to_executor = False
+                    for assignee in assignee_users:
+                        assignee_id = assignee.get('id', '')
+                        if isinstance(assignee_id, str):
+                            if ':' in assignee_id:
+                                assignee_type, assignee_num = assignee_id.split(':', 1)
+                                try:
+                                    assignee_num_int = int(assignee_num)
+                                    if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
+                                        is_assigned_to_executor = True
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                        elif isinstance(assignee_id, int):
+                            if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
+                                is_assigned_to_executor = True
+                                break
+                    
+                    if is_assigned_to_executor:
+                        filtered_tasks.append(t)
+                        logger.debug(f"Task {t.get('id')} added: assigned to executor {executor_planfix_id}")
+                    else:
+                        logger.debug(f"Task {t.get('id')} filtered out: not assigned to executor {executor_planfix_id}")
+                elif _is_bot_task(t):
                     filtered_tasks.append(t)
                 else:
                     logger.info(f"Task {t.get('id')} filtered out by _is_bot_task check")
@@ -2110,6 +2281,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                             task_status_id_from_log = None
                                         
                                         # Проверяем, не является ли задача завершенной
+                                        # Для всех задач показываем только "Новая" и "В работе"
                                         try:
                                             final_status_ids = _collect_status_ids(
                                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
@@ -2126,9 +2298,14 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         pass
                                             
                                             # Проверяем по ID статуса
-                                            if task_status_id_from_log is not None and task_status_id_from_log in final_status_ids:
-                                                logger.debug(f"Task {log_task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
-                                                continue
+                                            if task_status_id_from_log is not None:
+                                                if task_status_id_from_log in final_status_ids:
+                                                    logger.debug(f"Task {log_task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
+                                                    continue
+                                                # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                                if working_status_ids and task_status_id_from_log not in working_status_ids:
+                                                    logger.debug(f"Task {log_task_id} from BotLog filtered out: status_id {task_status_id_from_log} not in allowed statuses {working_status_ids}")
+                                                    continue
                                             
                                             # Проверяем по названию статуса
                                             if task_status_name_from_log:
@@ -2164,7 +2341,10 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         template_id = _normalize_pf_id(template_obj.get('id') if isinstance(template_obj, dict) else template_obj)
                                                         
                                                         # Проверяем шаблон
-                                                        if allowed_templates and template_id not in allowed_templates:
+                                                        # Для назначенных задач не фильтруем по шаблону
+                                                        if executor_planfix_id:
+                                                            logger.debug(f"Task {task_id} from BotLog is assigned to executor - skipping template filter")
+                                                        elif allowed_templates and template_id not in allowed_templates:
                                                             # Если это задача бота, пропускаем проверку шаблона
                                                             if task_id not in bot_task_ids_set:
                                                                 logger.debug(f"Task {task_id} from BotLog filtered out by template: {template_id} not in {allowed_templates}")
@@ -2194,6 +2374,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                             task_status_id_from_log = None
                                                         
                                                         # Проверяем, не является ли задача завершенной
+                                                        # Для всех задач показываем только "Новая" и "В работе"
                                                         try:
                                                             final_status_ids = _collect_status_ids(
                                                                 (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
@@ -2210,9 +2391,14 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                                         pass
                                                             
                                                             # Проверяем по ID статуса
-                                                            if task_status_id_from_log is not None and task_status_id_from_log in final_status_ids:
-                                                                logger.debug(f"Task {task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
-                                                                continue
+                                                            if task_status_id_from_log is not None:
+                                                                if task_status_id_from_log in final_status_ids:
+                                                                    logger.debug(f"Task {task_id} from BotLog filtered out: status_id {task_status_id_from_log} is final")
+                                                                    continue
+                                                                # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                                                if working_status_ids and task_status_id_from_log not in working_status_ids:
+                                                                    logger.debug(f"Task {task_id} from BotLog filtered out: status_id {task_status_id_from_log} not in allowed statuses {working_status_ids}")
+                                                                    continue
                                                             
                                                             # Проверяем по названию статуса
                                                             if task_status_name_from_log:
@@ -2229,10 +2415,14 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                             with db_manager.get_db() as db:
                                                                 task_cache = db_manager._manager.get_task_cache(db, task_id)
                                                                 if task_cache and task_cache.status_id:
-                                                                    # Проверяем, не является ли статус из кеша финальным
+                                                                    # Проверяем финальные статусы
                                                                     cache_status_id = task_cache.status_id
                                                                     if cache_status_id in final_status_ids:
                                                                         logger.debug(f"Task {task_id} from BotLog filtered out: status_id {cache_status_id} from TaskCache is final")
+                                                                        continue
+                                                                    # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                                                    if working_status_ids and cache_status_id not in working_status_ids:
+                                                                        logger.debug(f"Task {task_id} from BotLog filtered out: status_id {cache_status_id} from TaskCache not in allowed statuses {working_status_ids}")
                                                                         continue
                                                                     # Если статус из кеша отличается от статуса из API, используем статус из кеша
                                                                     if cache_status_id != task_status_id_from_log:
@@ -2241,6 +2431,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                                         # Проверяем еще раз по обновленному статусу
                                                                         if cache_status_id in final_status_ids:
                                                                             logger.debug(f"Task {task_id} from BotLog filtered out: updated status_id {cache_status_id} is final")
+                                                                            continue
+                                                                        if working_status_ids and cache_status_id not in working_status_ids:
+                                                                            logger.debug(f"Task {task_id} from BotLog filtered out: updated status_id {cache_status_id} not in allowed statuses {working_status_ids}")
                                                                             continue
                                                         except Exception as cache_check_err:
                                                             logger.debug(f"Error checking TaskCache for task {task_id}: {cache_check_err}")
@@ -2259,13 +2452,32 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                                     continue
                                                         
                                                         # ФИНАЛЬНАЯ ПРОВЕРКА: еще раз проверяем статус из TaskCache перед добавлением
+                                                        # Для всех задач показываем только "Новая" и "В работе"
                                                         try:
+                                                            final_status_ids = _collect_status_ids(
+                                                                (StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED),
+                                                                required=False
+                                                            )
+                                                            if not final_status_ids:
+                                                                final_status_ids = set()
+                                                                for status_key in [StatusKey.COMPLETED, StatusKey.FINISHED, StatusKey.CANCELLED, StatusKey.REJECTED]:
+                                                                    try:
+                                                                        sid = require_status_id(status_key)
+                                                                        if sid:
+                                                                            final_status_ids.add(sid)
+                                                                    except Exception:
+                                                                        pass
+                                                            
                                                             with db_manager.get_db() as db:
                                                                 task_cache = db_manager._manager.get_task_cache(db, task_id)
                                                                 if task_cache and task_cache.status_id:
                                                                     # Проверяем финальные статусы еще раз
                                                                     if task_cache.status_id in final_status_ids:
                                                                         logger.debug(f"Task {task_id} from BotLog FINAL CHECK: status_id {task_cache.status_id} from TaskCache is final - SKIPPING")
+                                                                        continue
+                                                                    # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                                                    if working_status_ids and task_cache.status_id not in working_status_ids:
+                                                                        logger.debug(f"Task {task_id} from BotLog FINAL CHECK: status_id {task_cache.status_id} from TaskCache not in allowed statuses {working_status_ids} - SKIPPING")
                                                                         continue
                                                                     # Также проверяем по названию статуса из кеша
                                                                     if task_cache.status_name:
@@ -2276,6 +2488,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                                             continue
                                                         except Exception as final_cache_check_err:
                                                             logger.debug(f"Error in final TaskCache check for task {task_id}: {final_cache_check_err}")
+                                                        else:
+                                                            # Для назначенных задач показываем все статусы (включая финальные)
+                                                            logger.debug(f"Task {task_id} from BotLog FINAL CHECK: is assigned to executor, showing all statuses")
                                                         
                                                         # Задача прошла все фильтры - добавляем
                                                         logger.info(f"✅ Added missing recent task {task_id} from BotLog to results")
@@ -2323,7 +2538,8 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     f"allowed_templates={allowed_templates}, "
                     f"allowed_restaurant_ids={allowed_restaurant_ids}, "
                     f"allowed_tag_names={allowed_tag_names}, "
-                    f"working_status_ids={working_status_ids}"
+                    f"working_status_ids={working_status_ids}, "
+                    f"executor_planfix_id={executor_planfix_id} ({executor_planfix_id_type})"
                 )
                 
                 # Проверяем, есть ли задачи в BotLog для этого исполнителя
@@ -2343,14 +2559,22 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 except Exception as diag_err:
                     logger.debug(f"Error in diagnostics: {diag_err}")
                 
-                await message.answer(
-                    "📋 <b>Новых заявок нет.</b>\n\n"
-                    "Все заявки по вашим концепциям обработаны.",
-                    parse_mode="HTML"
-                )
+                if executor_planfix_id:
+                    await message.answer(
+                        "📋 <b>У вас нет назначенных заявок.</b>\n\n"
+                        "Все заявки, назначенные на вас в Planfix, обработаны.",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.answer(
+                        "📋 <b>Новых заявок нет.</b>\n\n"
+                        "Все заявки по вашим концепциям обработаны.",
+                        parse_mode="HTML"
+                    )
                 return
 
             # Финальная проверка: исключаем задачи с финальными статусами из TaskCache
+            # Для всех задач (и назначенных, и неназначенных) показываем только "Новая" и "В работе"
             tasks_to_show = []
             try:
                 from services.status_registry import collect_status_ids as _collect_status_ids, StatusKey, require_status_id
@@ -2368,6 +2592,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         except Exception:
                             pass
                 
+                # Также проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                allowed_status_ids = set(working_status_ids) if working_status_ids else set()
+                
                 with db_manager.get_db() as db:
                     for task in all_new_tasks:
                         task_id = task.get('id')
@@ -2383,8 +2610,13 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             # Проверяем статус из TaskCache (более актуальный)
                             task_cache = db_manager._manager.get_task_cache(db, task_id)
                             if task_cache and task_cache.status_id:
+                                # Проверяем финальные статусы
                                 if task_cache.status_id in final_status_ids:
                                     logger.debug(f"Task {task_id} filtered out before display: status_id {task_cache.status_id} from TaskCache is final")
+                                    continue
+                                # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                if allowed_status_ids and task_cache.status_id not in allowed_status_ids:
+                                    logger.debug(f"Task {task_id} filtered out before display: status_id {task_cache.status_id} from TaskCache not in allowed statuses {allowed_status_ids}")
                                     continue
                                 # Также проверяем по названию статуса из кеша
                                 if task_cache.status_name:
@@ -2409,9 +2641,14 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                 task_status_id_from_task = None
                             
                             # Проверяем по ID статуса из задачи
-                            if task_status_id_from_task is not None and task_status_id_from_task in final_status_ids:
-                                logger.debug(f"Task {task_id} filtered out before display: status_id {task_status_id_from_task} from task data is final")
-                                continue
+                            if task_status_id_from_task is not None:
+                                if task_status_id_from_task in final_status_ids:
+                                    logger.debug(f"Task {task_id} filtered out before display: status_id {task_status_id_from_task} from task data is final")
+                                    continue
+                                # Проверяем, что статус входит в разрешенные (NEW или IN_PROGRESS)
+                                if allowed_status_ids and task_status_id_from_task not in allowed_status_ids:
+                                    logger.debug(f"Task {task_id} filtered out before display: status_id {task_status_id_from_task} from task data not in allowed statuses {allowed_status_ids}")
+                                    continue
                             
                             # Проверяем по названию статуса из задачи
                             if task_status_name_from_task:
@@ -2430,15 +2667,25 @@ async def show_new_tasks(message: Message, state: FSMContext):
                 tasks_to_show = all_new_tasks  # В случае ошибки показываем все задачи
             
             if not tasks_to_show:
-                await message.answer(
-                    "📋 <b>Новых заявок нет.</b>\n\n"
-                    "Все заявки по вашим концепциям обработаны.",
-                    parse_mode="HTML"
-                )
+                if executor_planfix_id:
+                    await message.answer(
+                        "📋 <b>У вас нет назначенных заявок.</b>\n\n"
+                        "Все заявки, назначенные на вас в Planfix, обработаны.",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.answer(
+                        "📋 <b>Новых заявок нет.</b>\n\n"
+                        "Все заявки по вашим концепциям обработаны.",
+                        parse_mode="HTML"
+                    )
                 return
             
             # Формируем список заявок
-            lines = [f"🆕 <b>Новые заявки ({len(tasks_to_show)}):</b>\n"]
+            if executor_planfix_id:
+                lines = [f"📋 <b>Мои заявки ({len(tasks_to_show)}):</b>\n"]
+            else:
+                lines = [f"🆕 <b>Новые заявки ({len(tasks_to_show)}):</b>\n"]
             
             for task in tasks_to_show[:10]:  # Показываем первые 10
                 task_id = task['id']
