@@ -1350,40 +1350,47 @@ async def webhook_handler(request):
     try:
         # Логируем ВСЕ входящие запросы на самом раннем этапе
         logger.info(f"🌐 Webhook request received: {request.method} {request.path_qs}, headers: {dict(request.headers)}")
-        # Проверка HTTP Basic Authentication (если настроены логин и пароль)
-        if PLANFIX_WEBHOOK_USERNAME and PLANFIX_WEBHOOK_PASSWORD:
-            import base64
-            auth_header = request.headers.get('Authorization', '')
-            if not auth_header.startswith('Basic '):
-                logger.warning("Webhook authentication required but no Basic Auth header found")
-                return web.Response(
-                    text='Authentication required',
-                    status=401,
-                    headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
-                )
-            
-            try:
-                # Декодируем Basic Auth
-                encoded = auth_header.split(' ', 1)[1]
-                decoded = base64.b64decode(encoded).decode('utf-8')
-                username, password = decoded.split(':', 1)
-                
-                # Проверяем учетные данные
-                if username != PLANFIX_WEBHOOK_USERNAME or password != PLANFIX_WEBHOOK_PASSWORD:
-                    logger.warning(f"Invalid webhook credentials: username={username}")
-                    return web.Response(
-                        text='Invalid credentials',
-                        status=401,
-                        headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
-                    )
-                logger.debug(f"Webhook Basic Auth successful for user: {username}")
-            except Exception as auth_err:
-                logger.warning(f"Error processing Basic Auth: {auth_err}")
-                return web.Response(
-                    text='Authentication error',
-                    status=401,
-                    headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
-                )
+        
+        # ПРИМЕЧАНИЕ: Basic Auth проверяется на уровне Nginx (auth_basic)
+        # Если запрос дошел до приложения, значит Nginx уже проверил аутентификацию
+        # Дополнительная проверка Basic Auth в приложении отключена, чтобы избежать конфликтов
+        # Если нужно проверять Basic Auth только в приложении (без Nginx), раскомментируйте код ниже
+        
+        # Проверка HTTP Basic Authentication (только если НЕ используется Nginx с auth_basic)
+        # Раскомментируйте, если хотите проверять Basic Auth только в приложении:
+        # if PLANFIX_WEBHOOK_USERNAME and PLANFIX_WEBHOOK_PASSWORD:
+        #     import base64
+        #     auth_header = request.headers.get('Authorization', '')
+        #     if not auth_header.startswith('Basic '):
+        #         logger.warning("Webhook authentication required but no Basic Auth header found")
+        #         return web.Response(
+        #             text='Authentication required',
+        #             status=401,
+        #             headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+        #         )
+        #     
+        #     try:
+        #         # Декодируем Basic Auth
+        #         encoded = auth_header.split(' ', 1)[1]
+        #         decoded = base64.b64decode(encoded).decode('utf-8')
+        #         username, password = decoded.split(':', 1)
+        #         
+        #         # Проверяем учетные данные
+        #         if username != PLANFIX_WEBHOOK_USERNAME or password != PLANFIX_WEBHOOK_PASSWORD:
+        #             logger.warning(f"Invalid webhook credentials: username={username}")
+        #             return web.Response(
+        #                 text='Invalid credentials',
+        #                 status=401,
+        #                 headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+        #             )
+        #         logger.debug(f"Webhook Basic Auth successful for user: {username}")
+        #     except Exception as auth_err:
+        #         logger.warning(f"Error processing Basic Auth: {auth_err}")
+        #         return web.Response(
+        #             text='Authentication error',
+        #             status=401,
+        #             headers={'WWW-Authenticate': 'Basic realm="Planfix Webhook"'}
+        #         )
         
         # Получаем сырое тело запроса для диагностики
         raw_body = await request.read()
