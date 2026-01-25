@@ -2294,7 +2294,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                                         
                                                         # Задача прошла все фильтры - добавляем
                                                         logger.info(f"✅ Added missing recent task {task_id} from BotLog to results")
-                                                        filtered_tasks.append(task)
+                                                        all_new_tasks.append(task)
                                                         existing_task_ids.add(task_id)
                                                 except (ValueError, TypeError) as e:
                                                     logger.warning(f"Error processing task {log_task_id} from BotLog: {e}")
@@ -2307,18 +2307,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
             except Exception as recent_err:
                 logger.warning(f"Error checking recent BotLog tasks: {recent_err}")
             
-            all_new_tasks = filtered_tasks
+            # Все задачи из TaskCache уже назначены на исполнителя, дополнительная фильтрация не нужна
             logger.info(
-                f"Executor {executor.telegram_id} final filtered tasks: {len(all_new_tasks)} "
-                f"(before bot filter: {before_bot_filter}, filtered out: {before_bot_filter - len(all_new_tasks)})"
+                f"Executor {executor.telegram_id} final tasks: {len(all_new_tasks)} "
+                f"(all tasks from TaskCache are assigned to executor)"
             )
-            
-            # Дополнительная диагностика: если задач нет, но были до фильтра бота
-            if not all_new_tasks and before_bot_filter > 0:
-                logger.warning(
-                    f"Executor {executor.telegram_id}: {before_bot_filter} tasks passed all filters "
-                    f"but were filtered out by _is_bot_task. This may indicate that tasks are not marked as bot tasks."
-                )
             
             # Дедупликация и ортировка по дате
             try:
