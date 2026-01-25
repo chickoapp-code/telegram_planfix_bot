@@ -5,6 +5,7 @@
 
 import logging
 import asyncio
+import json
 from typing import List
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -321,19 +322,37 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             ]
             
             try:
-                # Запрашиваем больше задач, чтобы найти все назначенные
-                response = await planfix_client.get_task_list(
-                    filters=filters,
-                    fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
-                    page_size=100,
-                    offset=0
-                )
+                # Запрашиваем ВСЕ задачи с пагинацией, чтобы найти все назначенные
+                page_size = 100
+                offset = 0
+                max_pages = 20  # Максимум 20 страниц (2000 задач) для каждого статуса
                 
-                if response and response.get('result') == 'success':
-                    tasks_list = response.get('tasks', [])
-                    if tasks_list:
-                        all_tasks.extend(tasks_list)
-                        logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id}")
+                while offset < max_pages * page_size:
+                    response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
+                        page_size=page_size,
+                        offset=offset
+                    )
+                    
+                    if response and response.get('result') == 'success':
+                        tasks_list = response.get('tasks', [])
+                        if tasks_list:
+                            all_tasks.extend(tasks_list)
+                            logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id} (offset={offset}, total so far: {len(all_tasks)})")
+                            
+                            # Если получили меньше задач, чем page_size, значит это последняя страница
+                            if len(tasks_list) < page_size:
+                                break
+                        else:
+                            # Нет задач на этой странице, прекращаем
+                            break
+                    else:
+                        logger.warning(f"Failed to fetch tasks with status {status_id} at offset {offset}: {response}")
+                        break
+                    
+                    offset += page_size
+                    
             except Exception as e:
                 logger.error(f"Error fetching tasks with status {status_id}: {e}")
         
@@ -1054,19 +1073,37 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             ]
             
             try:
-                # Запрашиваем больше задач, чтобы найти все назначенные
-                response = await planfix_client.get_task_list(
-                    filters=filters,
-                    fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
-                    page_size=100,
-                    offset=0
-                )
+                # Запрашиваем ВСЕ задачи с пагинацией, чтобы найти все назначенные
+                page_size = 100
+                offset = 0
+                max_pages = 20  # Максимум 20 страниц (2000 задач) для каждого статуса
                 
-                if response and response.get('result') == 'success':
-                    tasks_list = response.get('tasks', [])
-                    if tasks_list:
-                        all_tasks.extend(tasks_list)
-                        logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id}")
+                while offset < max_pages * page_size:
+                    response = await planfix_client.get_task_list(
+                        filters=filters,
+                        fields="id,name,status,counterparty,dateTime,dateOfLastUpdate,assignees",
+                        page_size=page_size,
+                        offset=offset
+                    )
+                    
+                    if response and response.get('result') == 'success':
+                        tasks_list = response.get('tasks', [])
+                        if tasks_list:
+                            all_tasks.extend(tasks_list)
+                            logger.info(f"Fetched {len(tasks_list)} tasks with status {status_id} (offset={offset}, total so far: {len(all_tasks)})")
+                            
+                            # Если получили меньше задач, чем page_size, значит это последняя страница
+                            if len(tasks_list) < page_size:
+                                break
+                        else:
+                            # Нет задач на этой странице, прекращаем
+                            break
+                    else:
+                        logger.warning(f"Failed to fetch tasks with status {status_id} at offset {offset}: {response}")
+                        break
+                    
+                    offset += page_size
+                    
             except Exception as e:
                 logger.error(f"Error fetching tasks with status {status_id}: {e}")
         
@@ -1075,6 +1112,11 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             logger.info(f"Filtering tasks by executor {executor_planfix_id_type}:{executor_planfix_id} from {len(all_tasks)} total tasks")
             for task in all_tasks:
                 task_id = task.get('id')
+                
+                # Специальная проверка для задачи 85968 (для диагностики)
+                if task_id == 85968:
+                    logger.info(f"🔍 Found task 85968! Full task data: {json.dumps(task, indent=2, ensure_ascii=False)}")
+                
                 assignees = task.get('assignees', {}) or {}
                 
                 # Проверяем всех назначенных: users, contacts, groups
@@ -1084,6 +1126,11 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                 
                 # Объединяем всех назначенных в один список для проверки
                 all_assignees = assignee_users + assignee_contacts + assignee_groups
+                
+                # Специальная проверка для задачи 85968
+                if task_id == 85968:
+                    logger.info(f"🔍 Task 85968 assignees: users={assignee_users}, contacts={assignee_contacts}, groups={assignee_groups}")
+                    logger.info(f"🔍 Looking for executor {executor_planfix_id_type}:{executor_planfix_id}")
                 
                 is_assigned = False
                 for assignee in all_assignees:
@@ -1103,6 +1150,8 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                                 if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
                                     is_assigned = True
                                     logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
+                                    if task_id == 85968:
+                                        logger.info(f"🔍 Task 85968 MATCHED! Found {assignee_type}:{assignee_num_int}")
                                     break
                             except (ValueError, TypeError):
                                 continue
@@ -1113,6 +1162,8 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                                 if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
                                     is_assigned = True
                                     logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
+                                    if task_id == 85968:
+                                        logger.info(f"🔍 Task 85968 MATCHED! Found user:{assignee_num_int}")
                                     break
                             except (ValueError, TypeError):
                                 continue
@@ -1121,11 +1172,15 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                         if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
                             is_assigned = True
                             logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
+                            if task_id == 85968:
+                                logger.info(f"🔍 Task 85968 MATCHED! Found user:{assignee_id}")
                             break
                 
                 if is_assigned:
                     tasks.append(task)
                 else:
+                    if task_id == 85968:
+                        logger.warning(f"🔍 Task 85968 NOT matched! Executor {executor_planfix_id_type}:{executor_planfix_id} not found in {len(all_assignees)} assignees")
                     logger.debug(f"Task {task_id} not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees)")
             
             logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")

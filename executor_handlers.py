@@ -1681,9 +1681,9 @@ async def show_new_tasks(message: Message, state: FSMContext):
                     logger.warning("No working status IDs found, will query tasks without status filter")
                     status_ids_to_query = [None]
 
-            page_size = 50
-            max_pages_per_status = 3  # Увеличиваем количество страниц, чтобы найти недавно созданные задачи
-            max_total_tasks = 150  # Увеличиваем лимит задач для обработки
+            page_size = 100
+            max_pages_per_status = 20  # Увеличиваем количество страниц для получения всех задач
+            max_total_tasks = 2000  # Увеличиваем лимит задач для обработки
 
             for status_id in status_ids_to_query:
                 offset = 0
@@ -1707,25 +1707,16 @@ async def show_new_tasks(message: Message, state: FSMContext):
                             {"type": 10, "operator": "equal", "value": status_id},  # type 10 = Task status
                         )
                     
-                    # Оптимизация: добавляем фильтр по дате на уровне API (только последние 30 дней для назначенных задач)
-                    # Формат даты для Planfix: "DD-MM-YYYY"
-                    days_back = 30 if executor_planfix_id else 7  # Для назначенных задач смотрим дальше
-                    date_from = ((datetime.now() - timedelta(days=days_back)).strftime("%d-%m-%Y"))
-                    filters.append({
-                        "type": 13,  # type 13 = Start date filter
-                        "operator": "gt",  # greater than (больше чем)
-                        "value": {
-                            "dateType": "otherDate",
-                            "dateValue": date_from
-                        }
-                    })
+                    # УБИРАЕМ фильтр по дате, чтобы получать ВСЕ задачи со статусами "Новая" и "В работе"
+                    # Это важно, так как задачи могут быть старше 30 дней
+                    # Фильтр по дате был удален для получения всех назначенных задач
 
                     logger.info(
-                        f"Querying tasks with status_id={status_id}, offset={offset}, page_size={page_size}, date_from={date_from}"
+                        f"Querying tasks with status_id={status_id}, offset={offset}, page_size={page_size} (no date filter)"
                     )
 
                     # Проверяем кэш запроса к API (отключаем кэш для первой страницы, чтобы видеть новые задачи)
-                    api_cache_key = f"api_tasks:{status_id}:{offset}:{page_size}:{date_from}"
+                    api_cache_key = f"api_tasks:{status_id}:{offset}:{page_size}"
                     tasks_response = None
                     # Для первой страницы не используем кэш, чтобы видеть новые задачи
                     # ВАЖНО: Не используем кэш для API запросов, чтобы всегда получать актуальные статусы задач
