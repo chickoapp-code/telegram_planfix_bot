@@ -343,11 +343,24 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             for task in all_tasks:
                 task_id = task.get('id')
                 assignees = task.get('assignees', {}) or {}
+                
+                # Проверяем всех назначенных: users, contacts, groups
                 assignee_users = assignees.get('users', []) or []
+                assignee_contacts = assignees.get('contacts', []) or []
+                assignee_groups = assignees.get('groups', []) or []
+                
+                # Объединяем всех назначенных в один список для проверки
+                all_assignees = assignee_users + assignee_contacts + assignee_groups
                 
                 is_assigned = False
-                for assignee in assignee_users:
+                for assignee in all_assignees:
+                    if not isinstance(assignee, dict):
+                        continue
+                    
                     assignee_id = assignee.get('id', '')
+                    if not assignee_id:
+                        continue
+                    
                     if isinstance(assignee_id, str):
                         # Может быть "user:123" или "contact:123"
                         if ':' in assignee_id:
@@ -356,6 +369,17 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
                                 assignee_num_int = int(assignee_num)
                                 if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
                                     is_assigned = True
+                                    logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                        else:
+                            # Попробуем как число
+                            try:
+                                assignee_num_int = int(assignee_id)
+                                if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
+                                    is_assigned = True
+                                    logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
                                     break
                             except (ValueError, TypeError):
                                 continue
@@ -363,10 +387,13 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
                         # Если ID без префикса, проверяем как user
                         if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
                             is_assigned = True
+                            logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
                             break
                 
                 if is_assigned:
                     tasks.append(task)
+                else:
+                    logger.debug(f"Task {task_id} not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees)")
             
             logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
         else:
@@ -1049,11 +1076,24 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             for task in all_tasks:
                 task_id = task.get('id')
                 assignees = task.get('assignees', {}) or {}
+                
+                # Проверяем всех назначенных: users, contacts, groups
                 assignee_users = assignees.get('users', []) or []
+                assignee_contacts = assignees.get('contacts', []) or []
+                assignee_groups = assignees.get('groups', []) or []
+                
+                # Объединяем всех назначенных в один список для проверки
+                all_assignees = assignee_users + assignee_contacts + assignee_groups
                 
                 is_assigned = False
-                for assignee in assignee_users:
+                for assignee in all_assignees:
+                    if not isinstance(assignee, dict):
+                        continue
+                    
                     assignee_id = assignee.get('id', '')
+                    if not assignee_id:
+                        continue
+                    
                     if isinstance(assignee_id, str):
                         # Может быть "user:123" или "contact:123"
                         if ':' in assignee_id:
@@ -1062,6 +1102,17 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                                 assignee_num_int = int(assignee_num)
                                 if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
                                     is_assigned = True
+                                    logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                        else:
+                            # Попробуем как число
+                            try:
+                                assignee_num_int = int(assignee_id)
+                                if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
+                                    is_assigned = True
+                                    logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
                                     break
                             except (ValueError, TypeError):
                                 continue
@@ -1069,10 +1120,13 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
                         # Если ID без префикса, проверяем как user
                         if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
                             is_assigned = True
+                            logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
                             break
                 
                 if is_assigned:
                     tasks.append(task)
+                else:
+                    logger.debug(f"Task {task_id} not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees)")
             
             logger.info(f"Found {len(tasks)} tasks assigned to executor {executor_id} out of {len(all_tasks)} total tasks")
         else:

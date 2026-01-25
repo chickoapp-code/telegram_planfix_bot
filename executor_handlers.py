@@ -1786,11 +1786,24 @@ async def show_new_tasks(message: Message, state: FSMContext):
                         # Если у исполнителя есть planfix_user_id или planfix_contact_id, проверяем назначение задачи
                         if executor_planfix_id and executor_planfix_id_type:
                             assignees = task.get('assignees', {}) or {}
+                            
+                            # Проверяем всех назначенных: users, contacts, groups
                             assignee_users = assignees.get('users', []) or []
+                            assignee_contacts = assignees.get('contacts', []) or []
+                            assignee_groups = assignees.get('groups', []) or []
+                            
+                            # Объединяем всех назначенных в один список для проверки
+                            all_assignees = assignee_users + assignee_contacts + assignee_groups
                             
                             is_assigned = False
-                            for assignee in assignee_users:
+                            for assignee in all_assignees:
+                                if not isinstance(assignee, dict):
+                                    continue
+                                
                                 assignee_id = assignee.get('id', '')
+                                if not assignee_id:
+                                    continue
+                                
                                 if isinstance(assignee_id, str):
                                     # Может быть "user:123" или "contact:123"
                                     if ':' in assignee_id:
@@ -1799,6 +1812,17 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                             assignee_num_int = int(assignee_num)
                                             if assignee_type == executor_planfix_id_type and assignee_num_int == executor_planfix_id:
                                                 is_assigned = True
+                                                logger.debug(f"Task {task_id} assigned to executor: found {assignee_type}:{assignee_num_int} in assignees")
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+                                    else:
+                                        # Попробуем как число
+                                        try:
+                                            assignee_num_int = int(assignee_id)
+                                            if executor_planfix_id_type == "user" and assignee_num_int == executor_planfix_id:
+                                                is_assigned = True
+                                                logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_num_int} in assignees")
                                                 break
                                         except (ValueError, TypeError):
                                             continue
@@ -1806,11 +1830,12 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                     # Если ID без префикса, проверяем как user
                                     if executor_planfix_id_type == "user" and assignee_id == executor_planfix_id:
                                         is_assigned = True
+                                        logger.debug(f"Task {task_id} assigned to executor: found user:{assignee_id} in assignees")
                                         break
                             
                             # Пропускаем задачу, если она не назначена на этого исполнителя
                             if not is_assigned:
-                                logger.debug(f"Task {task_id} is not assigned to executor {executor_planfix_id_type}:{executor_planfix_id}, skipping")
+                                logger.debug(f"Task {task_id} is not assigned to executor {executor_planfix_id_type}:{executor_planfix_id} (checked {len(all_assignees)} assignees), skipping")
                                 continue
 
                         # Нормализуем task_id для использования в кеше
