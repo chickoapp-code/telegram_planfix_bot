@@ -1889,23 +1889,11 @@ async def show_new_tasks(message: Message, state: FSMContext):
 
                         logger.info(f"Task {task_id} passed all filters, adding to list")
                         all_new_tasks.append(task)
-
-                    offset += len(tasks)
-                    page_index += 1
-
-                    if len(tasks) < page_size:
-                        logger.info(
-                            f"Reached last page for status {status_id}: fetched {len(tasks)} tasks (< {page_size})"
-                        )
-                        break
-
-                    if oldest_task_date_in_page and oldest_task_date_in_page < seven_days_ago:
-                        logger.info(
-                            f"Stopping pagination for status {status_id}: "
-                            f"oldest task date {oldest_task_date_in_page} is older than 7 days"
-                        )
-                        break
                 
+                logger.info(f"Loaded {len(all_new_tasks)} tasks from TaskCache for executor {executor.telegram_id}")
+            else:
+                logger.info(f"No task assignments found for executor {executor.telegram_id}")
+            
             # Фильтрация: показываем только заявки, созданные через бота
             # НО: если задача назначена на исполнителя (executor_planfix_id), показываем все назначенные задачи
             # Используем BotLog для более надежной проверки
