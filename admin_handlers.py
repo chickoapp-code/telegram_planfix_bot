@@ -27,6 +27,9 @@ from keyboards import (
 from services.db_service import db_manager
 from config import TELEGRAM_ADMIN_IDS, FRANCHISE_GROUPS
 from database import UserProfile, ExecutorProfile, TaskAssignment, BotLog
+from executor_handlers import resolve_counterparty_name
+from shared_cache import cache
+from services.status_registry import StatusKey, status_labels
 
 
 async def _format_user_profile(user_id: int) -> str:
@@ -353,13 +356,12 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             await message.answer(
                 f"📋 <b>Заявки исполнителя</b>\n\n"
                 f"👷 <b>{executor_name}</b> (ID: {executor_id})\n\n"
-                f"❌ У исполнителя нет назначенных заявок со статусами 'Новая' или 'В работе'.\n\n"
-                f"Всего проверено задач: {len(all_tasks)}",
+                f"❌ У исполнителя нет назначенных заявок со статусами 'Новая' или 'В работе'.",
                 parse_mode="HTML"
             )
             return
         
-        # Формируем список заявок
+        # Формируем список заявок (используем тот же формат, что у исполнителя)
         executor_name = executor.full_name or f"ID: {executor_id}"
         lines = [
             f"📋 <b>Заявки исполнителя</b>\n",
@@ -368,31 +370,85 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             "────────────────────\n"
         ]
         
-        # Показываем первые 20 заявок
-        for task in tasks[:20]:
+        # Показываем первые 10 заявок (как у исполнителя)
+        for task in tasks[:10]:
             task_id = task.get('id')
             task_name = task.get('name', 'Без названия')[:50]
-            status_obj = task.get('status', {})
-            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
             
-            # Получаем название ресторана (если есть)
-            counterparty_id = None
-            counterparty_obj = task.get('counterparty', {})
-            if isinstance(counterparty_obj, dict):
-                counterparty_id = counterparty_obj.get('id')
+            # Получаем название ресторана (используем ту же логику, что у исполнителя)
+            _cp_key = f"cp_name:{task_id}"
+            counterparty = cache.get(_cp_key)
+            if not counterparty:
+                # Пытаемся получить название синхронно
+                try:
+                    counterparty = await resolve_counterparty_name(task)
+                    # Сохраняем в кэш на 5 минут
+                    cache.set(_cp_key, counterparty, ttl_seconds=300)
+                except Exception as e:
+                    logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
+                    # Если не удалось получить название, показываем ID ресторана (если есть)
+                    counterparty_obj = task.get('counterparty', {})
+                    if isinstance(counterparty_obj, dict):
+                        counterparty_id = counterparty_obj.get('id')
+                        if counterparty_id:
+                            try:
+                                if isinstance(counterparty_id, str) and ':' in counterparty_id:
+                                    counterparty_id = counterparty_id.split(':')[-1]
+                                counterparty = f"Ресторан ID: {counterparty_id}"
+                            except Exception:
+                                counterparty = "Не указан"
+                        else:
+                            counterparty = "Не указан"
+                    else:
+                        counterparty = "Не указан"
             
-            restaurant_info = ""
-            if counterparty_id:
-                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
+            status_id = None
+            status_name = None
+            try:
+                with sync_db_manager.get_db() as db:
+                    task_cache = sync_db_manager.get_task_cache(db, task_id)
+                    if task_cache and task_cache.status_id:
+                        status_id = task_cache.status_id
+                        status_name = task_cache.status_name
+            except Exception:
+                pass
+            
+            # Если статус из кеша недоступен, используем статус из задачи
+            if status_id is None:
+                raw_status = task.get('status', {}) or {}
+                raw_status_id = raw_status.get('id')
+                status_name = raw_status.get('name')
+                if isinstance(raw_status_id, int):
+                    status_id = raw_status_id
+                elif isinstance(raw_status_id, str):
+                    try:
+                        status_id = int(str(raw_status_id).split(':')[-1])
+                    except Exception:
+                        status_id = None
+            
+            # В списке заявок используем те же статусы, что и у исполнителя
+            status_display_name = status_name or status_labels(
+                (
+                    (StatusKey.NEW, "Новая"),
+                    (StatusKey.REPLY_RECEIVED, "Получен ответ"),
+                    (StatusKey.TIMEOUT, "Истек срок ответа"),
+                    (StatusKey.IN_PROGRESS, "В работе"),
+                    (StatusKey.INFO_SENT, "Отправлена информация"),
+                    (StatusKey.COMPLETED, "Выполненная"),
+                    (StatusKey.POSTPONED, "Отложенная"),
+                )
+            ).get(status_id, "Новая")
             
             lines.append(
-                f"📋 <b>#{task_id}</b> – {status_name}\n"
-                f"📝 {task_name}{restaurant_info}\n"
+                f"📋 <b>#{task_id}</b> – {status_display_name}\n"
+                f"🏪 <b>Ресторан:</b> {counterparty}\n"
+                f"📝 <b>Описание:</b> {task_name}\n"
                 f"────────────────────"
             )
         
-        if len(tasks) > 20:
-            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        if len(tasks) > 10:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 10} заявок</i>")
         
         # Создаем клавиатуру с кнопками для просмотра деталей заявок
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1631,7 +1687,7 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             )
             return
         
-        # Формируем список заявок
+        # Формируем список заявок (используем тот же формат, что у исполнителя)
         executor_name = executor.full_name or f"ID: {executor_id}"
         lines = [
             f"📋 <b>Заявки исполнителя</b>\n",
@@ -1640,31 +1696,85 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             "────────────────────\n"
         ]
         
-        # Показываем первые 20 заявок
-        for task in tasks[:20]:
+        # Показываем первые 10 заявок (как у исполнителя)
+        for task in tasks[:10]:
             task_id = task.get('id')
             task_name = task.get('name', 'Без названия')[:50]
-            status_obj = task.get('status', {})
-            status_name = status_obj.get('name', 'Неизвестно') if isinstance(status_obj, dict) else 'Неизвестно'
             
-            # Получаем название ресторана (если есть)
-            counterparty_id = None
-            counterparty_obj = task.get('counterparty', {})
-            if isinstance(counterparty_obj, dict):
-                counterparty_id = counterparty_obj.get('id')
+            # Получаем название ресторана (используем ту же логику, что у исполнителя)
+            _cp_key = f"cp_name:{task_id}"
+            counterparty = cache.get(_cp_key)
+            if not counterparty:
+                # Пытаемся получить название синхронно
+                try:
+                    counterparty = await resolve_counterparty_name(task)
+                    # Сохраняем в кэш на 5 минут
+                    cache.set(_cp_key, counterparty, ttl_seconds=300)
+                except Exception as e:
+                    logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
+                    # Если не удалось получить название, показываем ID ресторана (если есть)
+                    counterparty_obj = task.get('counterparty', {})
+                    if isinstance(counterparty_obj, dict):
+                        counterparty_id = counterparty_obj.get('id')
+                        if counterparty_id:
+                            try:
+                                if isinstance(counterparty_id, str) and ':' in counterparty_id:
+                                    counterparty_id = counterparty_id.split(':')[-1]
+                                counterparty = f"Ресторан ID: {counterparty_id}"
+                            except Exception:
+                                counterparty = "Не указан"
+                        else:
+                            counterparty = "Не указан"
+                    else:
+                        counterparty = "Не указан"
             
-            restaurant_info = ""
-            if counterparty_id:
-                restaurant_info = f"\n🏪 Ресторан ID: {counterparty_id}"
+            # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
+            status_id = None
+            status_name = None
+            try:
+                with sync_db_manager.get_db() as db:
+                    task_cache = sync_db_manager.get_task_cache(db, task_id)
+                    if task_cache and task_cache.status_id:
+                        status_id = task_cache.status_id
+                        status_name = task_cache.status_name
+            except Exception:
+                pass
+            
+            # Если статус из кеша недоступен, используем статус из задачи
+            if status_id is None:
+                raw_status = task.get('status', {}) or {}
+                raw_status_id = raw_status.get('id')
+                status_name = raw_status.get('name')
+                if isinstance(raw_status_id, int):
+                    status_id = raw_status_id
+                elif isinstance(raw_status_id, str):
+                    try:
+                        status_id = int(str(raw_status_id).split(':')[-1])
+                    except Exception:
+                        status_id = None
+            
+            # В списке заявок используем те же статусы, что и у исполнителя
+            status_display_name = status_name or status_labels(
+                (
+                    (StatusKey.NEW, "Новая"),
+                    (StatusKey.REPLY_RECEIVED, "Получен ответ"),
+                    (StatusKey.TIMEOUT, "Истек срок ответа"),
+                    (StatusKey.IN_PROGRESS, "В работе"),
+                    (StatusKey.INFO_SENT, "Отправлена информация"),
+                    (StatusKey.COMPLETED, "Выполненная"),
+                    (StatusKey.POSTPONED, "Отложенная"),
+                )
+            ).get(status_id, "Новая")
             
             lines.append(
-                f"📋 <b>#{task_id}</b> – {status_name}\n"
-                f"📝 {task_name}{restaurant_info}\n"
+                f"📋 <b>#{task_id}</b> – {status_display_name}\n"
+                f"🏪 <b>Ресторан:</b> {counterparty}\n"
+                f"📝 <b>Описание:</b> {task_name}\n"
                 f"────────────────────"
             )
         
-        if len(tasks) > 20:
-            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 20} заявок</i>")
+        if len(tasks) > 10:
+            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 10} заявок</i>")
         
         # Создаем клавиатуру с кнопками для просмотра деталей заявок
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
