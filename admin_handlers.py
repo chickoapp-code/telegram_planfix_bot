@@ -1426,25 +1426,23 @@ async def admin_view_task_details(callback_query: CallbackQuery, state: FSMConte
         try:
             checklist_response = await planfix_client.get_task_checklist(task_id)
             if checklist_response and checklist_response.get('result') == 'success':
-                # Проверяем разные возможные структуры ответа
-                checklist_items = (
-                    checklist_response.get('checklist', []) or 
-                    checklist_response.get('items', []) or 
-                    checklist_response.get('data', {}).get('checklist', []) or
-                    []
-                )
+                # Согласно swagger.json, ответ содержит поле 'items'
+                checklist_items = checklist_response.get('items', []) or []
                 if checklist_items:
                     checklist_lines = ["\n\n✅ <b>Чек-лист:</b>"]
                     for item in checklist_items:
                         if isinstance(item, dict):
-                            item_name = item.get('name', '') or item.get('text', '') or item.get('title', 'Без названия')
-                            is_checked = (
-                                item.get('isChecked', False) or 
-                                item.get('checked', False) or 
-                                item.get('is_checked', False) or
-                                item.get('status') == 'checked' or
-                                item.get('status') == 'completed'
-                            )
+                            item_name = item.get('name', 'Без названия')
+                            
+                            # Проверяем статус через поле 'status' (объект с id и name)
+                            is_checked = False
+                            status_obj = item.get('status', {})
+                            if isinstance(status_obj, dict):
+                                status_name = status_obj.get('name', '').lower() if status_obj.get('name') else ''
+                                # Проверяем по названию статуса
+                                if any(keyword in status_name for keyword in ['выполнен', 'checked', 'completed', 'done', 'готов']):
+                                    is_checked = True
+                            
                             checkbox = "☑️" if is_checked else "☐"
                             checklist_lines.append(f"{checkbox} {item_name}")
                     if len(checklist_lines) > 1:  # Если есть хотя бы один пункт

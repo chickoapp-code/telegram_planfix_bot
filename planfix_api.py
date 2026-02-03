@@ -1168,11 +1168,19 @@ class PlanfixAPIClient:
     # CHECKLIST
     # ============================================================================
 
-    async def get_task_checklist(self, task_id: int):
-        """Получает чек-лист задачи из Planfix."""
+    async def get_task_checklist(self, task_id: int, offset: int = 0, page_size: int = 100, fields: str = "id,name,isChecked"):
+        """Получает чек-лист задачи из Planfix.
+        
+        Согласно swagger.json, endpoint использует POST метод с телом запроса.
+        """
         endpoint = f"/task/{task_id}/checklist/list"
         try:
-            data = await self._request("GET", endpoint)
+            # Согласно swagger.json, это POST запрос с телом
+            data = await self._request("POST", endpoint, data={
+                "offset": offset,
+                "pageSize": page_size,
+                "fields": fields
+            })
             return data
         except Exception as e:
             logger.error(f"Failed to get checklist for task {task_id}: {e}")

@@ -371,12 +371,47 @@ def _format_restaurant_list(restaurants) -> str:
 # Помощник: надёжно получить имя контрагента задачи
 async def resolve_counterparty_name(task: dict) -> str:
     """
-    Оставлена только стратегия 2.7: восстановление названия контрагента через BotLog -> UserProfile -> restaurant_contact_id.
-    Все остальные стратегии отключены по требованию.
+    Получает название контрагента (ресторана) для задачи.
+    Использует несколько стратегий:
+    1. Прямое получение из задачи через counterparty.id (если доступно)
+    2. Восстановление через BotLog -> UserProfile -> restaurant_contact_id
     """
     try:
         task_id = task.get('id', 'unknown')
-        logger.info(f"[Task #{task_id}] ===== START Resolving counterparty name (Strategy 2.7 only) =====")
+        logger.info(f"[Task #{task_id}] ===== START Resolving counterparty name =====")
+        
+        # Стратегия 1: Прямое получение из задачи через counterparty.id
+        try:
+            counterparty_obj = task.get('counterparty', {})
+            if isinstance(counterparty_obj, dict):
+                counterparty_id = counterparty_obj.get('id')
+                counterparty_name = counterparty_obj.get('name')
+                
+                # Если название уже есть в объекте, используем его
+                if counterparty_name and counterparty_name.strip() and counterparty_name != "Неизвестно":
+                    logger.info(f"[Task #{task_id}] ✅ Strategy 1 SUCCESS: Found name in task counterparty object: {counterparty_name}")
+                    return counterparty_name.strip()
+                
+                # Если есть только ID, получаем название через API
+                if counterparty_id:
+                    try:
+                        # Нормализуем ID
+                        if isinstance(counterparty_id, str) and ':' in counterparty_id:
+                            counterparty_id = int(counterparty_id.split(':')[-1])
+                        else:
+                            counterparty_id = int(counterparty_id)
+                        
+                        resp = await planfix_client.get_contact_by_id(counterparty_id, fields="id,name,midName,lastName,isCompany")
+                        if resp and resp.get('result') == 'success':
+                            contact = resp.get('contact') or {}
+                            contact_info = extract_contact_info(contact)
+                            if contact_info.get('name') and contact_info['name'] != "Неизвестно":
+                                logger.info(f"[Task #{task_id}] ✅ Strategy 1 SUCCESS: Found name via API: {contact_info['name']}")
+                                return contact_info['name']
+                    except Exception as api_err:
+                        logger.debug(f"[Task #{task_id}] Strategy 1 API call failed: {api_err}")
+        except Exception as e:
+            logger.debug(f"[Task #{task_id}] Strategy 1 failed: {e}")
         
         # Стратегия 2.7: восстановление через BotLog -> user -> restaurant_contact_id
         try:
@@ -422,8 +457,8 @@ async def resolve_counterparty_name(task: dict) -> str:
     except Exception as e:
         logger.error(f"[Task #{task.get('id', 'unknown')}] ❌ OUTER EXCEPTION: {e}", exc_info=True)
     
-    # Если стратегия 2.7 не сработала
-    logger.warning(f"[Task #{task.get('id', 'unknown')}] Strategy 2.7 did not resolve name. Returning 'Не указан'")
+    # Если все стратегии не сработали
+    logger.warning(f"[Task #{task.get('id', 'unknown')}] All strategies failed. Returning 'Не указан'")
     return "Не указан"
 
 async def resolve_project_name(task: dict) -> str:
@@ -1876,7 +1911,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                     try:
                                         task_response = await planfix_client.get_task_by_id(
                                             log_task_id,
-                                            fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
+                                            fields="id,name,description,status,template,counterparty.id,counterparty.name,dateTime,tags,dataTags,project"
                                         )
                                     except Exception as e1:
                                         logger.debug(f"Failed to fetch task {log_task_id} by generalId: {e1}")
@@ -1886,7 +1921,7 @@ async def show_new_tasks(message: Message, state: FSMContext):
                                             try:
                                                 task_response = await planfix_client.get_task_by_id(
                                                     int(internal_id),
-                                                    fields="id,name,description,status,template,counterparty,dateTime,tags,dataTags,project"
+                                                    fields="id,name,description,status,template,counterparty.id,counterparty.name,dateTime,tags,dataTags,project"
                                                 )
                                                 logger.info(f"✅ Fetched task {log_task_id} by internal ID {internal_id}")
                                             except Exception as e2:
@@ -2313,17 +2348,32 @@ async def show_new_tasks(message: Message, state: FSMContext):
             for task in tasks_to_show[:10]:  # Показываем первые 10
                 task_id = task['id']
                 task_name = task.get('name', 'Без названия')[:50]
-                # КЭШ: контрагент с фоновой подгрузкой (точечное ускорение)
+                # КЭШ: контрагент с синхронной подгрузкой, если нет в кэше
                 _cp_key = f"cp_name:{task_id}"
-                counterparty = cache.get(_cp_key) or "Определяется…"
-                if counterparty == "Определяется…":
-                    async def _bg_resolve_cp(tid, tdata):
-                        try:
-                            name = await resolve_counterparty_name(tdata)
-                            cache.set(f"cp_name:{tid}", name, ttl_seconds=300)
-                        except Exception:
-                            pass
-                    asyncio.create_task(_bg_resolve_cp(task_id, task))
+                counterparty = cache.get(_cp_key)
+                if not counterparty:
+                    # Пытаемся получить название синхронно
+                    try:
+                        counterparty = await resolve_counterparty_name(task)
+                        # Сохраняем в кэш на 5 минут
+                        cache.set(_cp_key, counterparty, ttl_seconds=300)
+                    except Exception as e:
+                        logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
+                        # Если не удалось получить название, показываем ID ресторана (если есть)
+                        counterparty_obj = task.get('counterparty', {})
+                        if isinstance(counterparty_obj, dict):
+                            counterparty_id = counterparty_obj.get('id')
+                            if counterparty_id:
+                                try:
+                                    if isinstance(counterparty_id, str) and ':' in counterparty_id:
+                                        counterparty_id = counterparty_id.split(':')[-1]
+                                    counterparty = f"Ресторан ID: {counterparty_id}"
+                                except Exception:
+                                    counterparty = "Не указан"
+                            else:
+                                counterparty = "Не указан"
+                        else:
+                            counterparty = "Не указан"
 
                 # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
                 status_id = None
@@ -2769,25 +2819,23 @@ async def show_task_details(message: Message, state: FSMContext):
         try:
             checklist_response = await planfix_client.get_task_checklist(task_id)
             if checklist_response and checklist_response.get('result') == 'success':
-                # Проверяем разные возможные структуры ответа
-                checklist_items = (
-                    checklist_response.get('checklist', []) or 
-                    checklist_response.get('items', []) or 
-                    checklist_response.get('data', {}).get('checklist', []) or
-                    []
-                )
+                # Согласно swagger.json, ответ содержит поле 'items'
+                checklist_items = checklist_response.get('items', []) or []
                 if checklist_items:
                     checklist_lines = ["\n\n✅ <b>Чек-лист:</b>"]
                     for item in checklist_items:
                         if isinstance(item, dict):
-                            item_name = item.get('name', '') or item.get('text', '') or item.get('title', 'Без названия')
-                            is_checked = (
-                                item.get('isChecked', False) or 
-                                item.get('checked', False) or 
-                                item.get('is_checked', False) or
-                                item.get('status') == 'checked' or
-                                item.get('status') == 'completed'
-                            )
+                            item_name = item.get('name', 'Без названия')
+                            
+                            # Проверяем статус через поле 'status' (объект с id и name)
+                            is_checked = False
+                            status_obj = item.get('status', {})
+                            if isinstance(status_obj, dict):
+                                status_name = status_obj.get('name', '').lower() if status_obj.get('name') else ''
+                                # Проверяем по названию статуса
+                                if any(keyword in status_name for keyword in ['выполнен', 'checked', 'completed', 'done', 'готов']):
+                                    is_checked = True
+                            
                             checkbox = "☑️" if is_checked else "☐"
                             checklist_lines.append(f"{checkbox} {item_name}")
                     if len(checklist_lines) > 1:  # Если есть хотя бы один пункт
