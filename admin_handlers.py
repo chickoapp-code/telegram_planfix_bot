@@ -30,6 +30,8 @@ from database import UserProfile, ExecutorProfile, TaskAssignment, BotLog
 from executor_handlers import resolve_counterparty_name
 from shared_cache import cache
 from services.status_registry import StatusKey, status_labels
+from db_manager import DBManager
+from db_manager import DBManager
 
 
 async def _format_user_profile(user_id: int) -> str:
@@ -236,6 +238,187 @@ async def cmd_admin_tasks(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка при получении заявок.")
 
 
+async def _show_admin_executor_tasks_page(message_or_callback, executor_id: int, executor_name: str, tasks: list, page: int = 0, is_callback: bool = False):
+    """
+    Показывает страницу задач исполнителя для админа с пагинацией.
+    
+    Args:
+        message_or_callback: Message или CallbackQuery объект
+        executor_id: ID исполнителя
+        executor_name: Имя исполнителя
+        tasks: Список всех задач
+        page: Номер страницы (начинается с 0)
+        is_callback: True если это callback (нужно использовать edit_text), False если message (answer)
+    """
+    TASKS_PER_PAGE = 5  # Количество задач на странице
+    
+    total_tasks = len(tasks)
+    total_pages = (total_tasks + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE  # Округление вверх
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * TASKS_PER_PAGE
+    end_idx = min(start_idx + TASKS_PER_PAGE, total_tasks)
+    page_tasks = tasks[start_idx:end_idx]
+    
+    # Формируем заголовок
+    header = f"📋 <b>Заявки исполнителя</b>\n"
+    header += f"👷 <b>{executor_name}</b> (ID: {executor_id})\n"
+    header += f"Всего заявок: {total_tasks}\n"
+    if total_pages > 1:
+        header += f"📄 Страница {page + 1} из {total_pages}\n"
+    header += "────────────────────\n"
+    
+    lines = [header]
+    
+    sync_db_manager = DBManager()
+    
+    # Формируем список задач для текущей страницы
+    for task in page_tasks:
+        task_id = task.get('id')
+        task_name = task.get('name', 'Без названия')[:50]
+        
+        # Получаем название ресторана
+        _cp_key = f"cp_name:{task_id}"
+        counterparty = cache.get(_cp_key)
+        if not counterparty:
+            # Пытаемся получить название синхронно
+            try:
+                counterparty = await resolve_counterparty_name(task)
+                # Сохраняем в кэш на 5 минут
+                cache.set(_cp_key, counterparty, ttl_seconds=300)
+            except Exception as e:
+                logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
+                # Если не удалось получить название, показываем ID ресторана (если есть)
+                counterparty_obj = task.get('counterparty', {})
+                if isinstance(counterparty_obj, dict):
+                    counterparty_id = counterparty_obj.get('id')
+                    if counterparty_id:
+                        try:
+                            if isinstance(counterparty_id, str) and ':' in counterparty_id:
+                                counterparty_id = counterparty_id.split(':')[-1]
+                            counterparty = f"Ресторан ID: {counterparty_id}"
+                        except Exception:
+                            counterparty = "Не указан"
+                    else:
+                        counterparty = "Не указан"
+                else:
+                    counterparty = "Не указан"
+        
+        # Определяем и нормализуем статус
+        status_id = None
+        status_name = None
+        try:
+            with sync_db_manager.get_db() as db:
+                task_cache = sync_db_manager.get_task_cache(db, task_id)
+                if task_cache and task_cache.status_id:
+                    status_id = task_cache.status_id
+                    status_name = task_cache.status_name
+        except Exception:
+            pass
+        
+        # Если статус из кеша недоступен, используем статус из задачи
+        if status_id is None:
+            raw_status = task.get('status', {}) or {}
+            raw_status_id = raw_status.get('id')
+            status_name = raw_status.get('name')
+            if isinstance(raw_status_id, int):
+                status_id = raw_status_id
+            elif isinstance(raw_status_id, str):
+                try:
+                    status_id = int(str(raw_status_id).split(':')[-1])
+                except Exception:
+                    status_id = None
+        
+        # Определяем отображаемое имя статуса
+        status_display_name = status_name or status_labels(
+            (
+                (StatusKey.NEW, "Новая"),
+                (StatusKey.REPLY_RECEIVED, "Получен ответ"),
+                (StatusKey.TIMEOUT, "Истек срок ответа"),
+                (StatusKey.IN_PROGRESS, "В работе"),
+                (StatusKey.INFO_SENT, "Отправлена информация"),
+                (StatusKey.COMPLETED, "Выполненная"),
+                (StatusKey.POSTPONED, "Отложенная"),
+            )
+        ).get(status_id, "Новая")
+        
+        lines.append(
+            f"📋 <b>#{task_id}</b> – {status_display_name}\n"
+            f"🏪 <b>Ресторан:</b> {counterparty}\n"
+            f"📝 <b>Описание:</b> {task_name}\n"
+            f"────────────────────"
+        )
+    
+    # Создаем inline-клавиатуру с кнопками выбора задач и навигации
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    
+    buttons = []
+    
+    # Кнопки выбора задач (по 2 в ряд)
+    task_rows = []
+    for i in range(0, len(page_tasks), 2):
+        row = []
+        for task in page_tasks[i:i+2]:
+            task_id = task.get('id')
+            row.append(InlineKeyboardButton(
+                text=f"#{task_id}",
+                callback_data=f"admin_view_task:{task_id}"
+            ))
+        task_rows.append(row)
+    
+    buttons.extend(task_rows)
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"admin_executor_tasks_page:{executor_id}:{page-1}"
+        ))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(
+            text="Вперед ▶️",
+            callback_data=f"admin_executor_tasks_page:{executor_id}:{page+1}"
+        ))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Кнопка обновления списка
+    buttons.append([InlineKeyboardButton(
+        text="🔄 Обновить список",
+        callback_data=f"admin_refresh_executor_tasks:{executor_id}"
+    )])
+    
+    # Кнопка возврата к профилю исполнителя
+    buttons.append([InlineKeyboardButton(
+        text="◀️ Назад к профилю",
+        callback_data=f"admin_view_executor:{executor_id}"
+    )])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    text = "\n".join(lines)
+    
+    # Отправляем или редактируем сообщение
+    if is_callback:
+        try:
+            await message_or_callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await message_or_callback.answer()
+        except Exception as e:
+            logger.debug(f"Error editing message: {e}")
+            await message_or_callback.answer()
+    else:
+        await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
 @router.message(Command("admin_executor_tasks"))
 async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
     """Команда для просмотра заявок исполнителя: /admin_executor_tasks <executor_id>"""
@@ -361,119 +544,12 @@ async def cmd_admin_executor_tasks(message: Message, state: FSMContext):
             )
             return
         
-        # Формируем список заявок (используем тот же формат, что у исполнителя)
+        # Сохраняем задачи в кэше для пагинации
         executor_name = executor.full_name or f"ID: {executor_id}"
-        lines = [
-            f"📋 <b>Заявки исполнителя</b>\n",
-            f"👷 <b>{executor_name}</b> (ID: {executor_id})\n",
-            f"Всего заявок: {len(tasks)}\n",
-            "────────────────────\n"
-        ]
+        cache.set(f"admin_executor_tasks:{executor_id}", tasks, ttl_seconds=300)
         
-        # Показываем первые 10 заявок (как у исполнителя)
-        for task in tasks[:10]:
-            task_id = task.get('id')
-            task_name = task.get('name', 'Без названия')[:50]
-            
-            # Получаем название ресторана (используем ту же логику, что у исполнителя)
-            _cp_key = f"cp_name:{task_id}"
-            counterparty = cache.get(_cp_key)
-            if not counterparty:
-                # Пытаемся получить название синхронно
-                try:
-                    counterparty = await resolve_counterparty_name(task)
-                    # Сохраняем в кэш на 5 минут
-                    cache.set(_cp_key, counterparty, ttl_seconds=300)
-                except Exception as e:
-                    logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
-                    # Если не удалось получить название, показываем ID ресторана (если есть)
-                    counterparty_obj = task.get('counterparty', {})
-                    if isinstance(counterparty_obj, dict):
-                        counterparty_id = counterparty_obj.get('id')
-                        if counterparty_id:
-                            try:
-                                if isinstance(counterparty_id, str) and ':' in counterparty_id:
-                                    counterparty_id = counterparty_id.split(':')[-1]
-                                counterparty = f"Ресторан ID: {counterparty_id}"
-                            except Exception:
-                                counterparty = "Не указан"
-                        else:
-                            counterparty = "Не указан"
-                    else:
-                        counterparty = "Не указан"
-            
-            # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
-            status_id = None
-            status_name = None
-            try:
-                with sync_db_manager.get_db() as db:
-                    task_cache = sync_db_manager.get_task_cache(db, task_id)
-                    if task_cache and task_cache.status_id:
-                        status_id = task_cache.status_id
-                        status_name = task_cache.status_name
-            except Exception:
-                pass
-            
-            # Если статус из кеша недоступен, используем статус из задачи
-            if status_id is None:
-                raw_status = task.get('status', {}) or {}
-                raw_status_id = raw_status.get('id')
-                status_name = raw_status.get('name')
-                if isinstance(raw_status_id, int):
-                    status_id = raw_status_id
-                elif isinstance(raw_status_id, str):
-                    try:
-                        status_id = int(str(raw_status_id).split(':')[-1])
-                    except Exception:
-                        status_id = None
-            
-            # В списке заявок используем те же статусы, что и у исполнителя
-            status_display_name = status_name or status_labels(
-                (
-                    (StatusKey.NEW, "Новая"),
-                    (StatusKey.REPLY_RECEIVED, "Получен ответ"),
-                    (StatusKey.TIMEOUT, "Истек срок ответа"),
-                    (StatusKey.IN_PROGRESS, "В работе"),
-                    (StatusKey.INFO_SENT, "Отправлена информация"),
-                    (StatusKey.COMPLETED, "Выполненная"),
-                    (StatusKey.POSTPONED, "Отложенная"),
-                )
-            ).get(status_id, "Новая")
-            
-            lines.append(
-                f"📋 <b>#{task_id}</b> – {status_display_name}\n"
-                f"🏪 <b>Ресторан:</b> {counterparty}\n"
-                f"📝 <b>Описание:</b> {task_name}\n"
-                f"────────────────────"
-            )
-        
-        if len(tasks) > 10:
-            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 10} заявок</i>")
-        
-        # Создаем клавиатуру с кнопками для просмотра деталей заявок
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        task_buttons = []
-        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
-            task_id = task.get('id')
-            task_name = task.get('name', f'Заявка #{task_id}')[:30]
-            task_buttons.append([
-                InlineKeyboardButton(
-                    text=f"#{task_id} - {task_name}",
-                    callback_data=f"admin_view_task:{task_id}"
-                )
-            ])
-        
-        task_buttons.append([
-            InlineKeyboardButton(text="👷 Профиль исполнителя", callback_data=f"admin_view_executor:{executor_id}")
-        ])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
-        
-        await message.answer(
-            "\n".join(lines),
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+        # Показываем первую страницу
+        await _show_admin_executor_tasks_page(message, executor_id, executor_name, tasks, page=0)
     except ValueError:
         await message.answer("❌ Неверный формат команды. Используйте: <code>/admin_executor_tasks &lt;executor_id&gt;</code>", parse_mode="HTML")
     except Exception as e:
@@ -1687,123 +1763,78 @@ async def admin_view_executor_tasks(callback_query: CallbackQuery, state: FSMCon
             )
             return
         
-        # Формируем список заявок (используем тот же формат, что у исполнителя)
+        # Сохраняем задачи в кэше для пагинации
         executor_name = executor.full_name or f"ID: {executor_id}"
-        lines = [
-            f"📋 <b>Заявки исполнителя</b>\n",
-            f"👷 <b>{executor_name}</b> (ID: {executor_id})\n",
-            f"Всего заявок: {len(tasks)}\n",
-            "────────────────────\n"
-        ]
+        cache.set(f"admin_executor_tasks:{executor_id}", tasks, ttl_seconds=300)
         
-        # Показываем первые 10 заявок (как у исполнителя)
-        for task in tasks[:10]:
-            task_id = task.get('id')
-            task_name = task.get('name', 'Без названия')[:50]
-            
-            # Получаем название ресторана (используем ту же логику, что у исполнителя)
-            _cp_key = f"cp_name:{task_id}"
-            counterparty = cache.get(_cp_key)
-            if not counterparty:
-                # Пытаемся получить название синхронно
-                try:
-                    counterparty = await resolve_counterparty_name(task)
-                    # Сохраняем в кэш на 5 минут
-                    cache.set(_cp_key, counterparty, ttl_seconds=300)
-                except Exception as e:
-                    logger.debug(f"Failed to resolve counterparty name for task {task_id}: {e}")
-                    # Если не удалось получить название, показываем ID ресторана (если есть)
-                    counterparty_obj = task.get('counterparty', {})
-                    if isinstance(counterparty_obj, dict):
-                        counterparty_id = counterparty_obj.get('id')
-                        if counterparty_id:
-                            try:
-                                if isinstance(counterparty_id, str) and ':' in counterparty_id:
-                                    counterparty_id = counterparty_id.split(':')[-1]
-                                counterparty = f"Ресторан ID: {counterparty_id}"
-                            except Exception:
-                                counterparty = "Не указан"
-                        else:
-                            counterparty = "Не указан"
-                    else:
-                        counterparty = "Не указан"
-            
-            # Определяем и нормализуем статус (используем актуальный статус из TaskCache если доступен)
-            status_id = None
-            status_name = None
-            try:
-                with sync_db_manager.get_db() as db:
-                    task_cache = sync_db_manager.get_task_cache(db, task_id)
-                    if task_cache and task_cache.status_id:
-                        status_id = task_cache.status_id
-                        status_name = task_cache.status_name
-            except Exception:
-                pass
-            
-            # Если статус из кеша недоступен, используем статус из задачи
-            if status_id is None:
-                raw_status = task.get('status', {}) or {}
-                raw_status_id = raw_status.get('id')
-                status_name = raw_status.get('name')
-                if isinstance(raw_status_id, int):
-                    status_id = raw_status_id
-                elif isinstance(raw_status_id, str):
-                    try:
-                        status_id = int(str(raw_status_id).split(':')[-1])
-                    except Exception:
-                        status_id = None
-            
-            # В списке заявок используем те же статусы, что и у исполнителя
-            status_display_name = status_name or status_labels(
-                (
-                    (StatusKey.NEW, "Новая"),
-                    (StatusKey.REPLY_RECEIVED, "Получен ответ"),
-                    (StatusKey.TIMEOUT, "Истек срок ответа"),
-                    (StatusKey.IN_PROGRESS, "В работе"),
-                    (StatusKey.INFO_SENT, "Отправлена информация"),
-                    (StatusKey.COMPLETED, "Выполненная"),
-                    (StatusKey.POSTPONED, "Отложенная"),
-                )
-            ).get(status_id, "Новая")
-            
-            lines.append(
-                f"📋 <b>#{task_id}</b> – {status_display_name}\n"
-                f"🏪 <b>Ресторан:</b> {counterparty}\n"
-                f"📝 <b>Описание:</b> {task_name}\n"
-                f"────────────────────"
-            )
-        
-        if len(tasks) > 10:
-            lines.append(f"\n💡 <i>... и ещё {len(tasks) - 10} заявок</i>")
-        
-        # Создаем клавиатуру с кнопками для просмотра деталей заявок
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        task_buttons = []
-        for task in tasks[:10]:  # Показываем кнопки для первых 10 заявок
-            task_id = task.get('id')
-            task_name = task.get('name', f'Заявка #{task_id}')[:30]
-            task_buttons.append([
-                InlineKeyboardButton(
-                    text=f"#{task_id} - {task_name}",
-                    callback_data=f"admin_view_task:{task_id}"
-                )
-            ])
-        
-        task_buttons.append([
-            InlineKeyboardButton(text="◀️ Назад к профилю", callback_data=f"admin_view_executor:{executor_id}")
-        ])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=task_buttons)
-        
-        await callback_query.message.answer(
-            "\n".join(lines),
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
+        # Показываем первую страницу
+        await _show_admin_executor_tasks_page(callback_query, executor_id, executor_name, tasks, page=0, is_callback=True)
     except Exception as e:
         logger.error(f"Error viewing executor tasks: {e}", exc_info=True)
         await callback_query.answer("❌ Ошибка при загрузке заявок.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_executor_tasks_page:"))
+async def admin_executor_tasks_page_callback(callback_query: CallbackQuery, state: FSMContext):
+    """Обработчик переключения страниц списка задач исполнителя для админа."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+    
+    try:
+        # Формат: admin_executor_tasks_page:executor_id:page
+        parts = callback_query.data.split(":")
+        executor_id = int(parts[1])
+        page = int(parts[2])
+        
+        # Получаем список задач из кэша
+        tasks = cache.get(f"admin_executor_tasks:{executor_id}")
+        if not tasks:
+            await callback_query.answer("❌ Список задач устарел. Обновите список.", show_alert=True)
+            return
+        
+        # Получаем информацию об исполнителе
+        executor = await db_manager.get_executor_profile(executor_id)
+        if not executor:
+            await callback_query.answer("❌ Исполнитель не найден.", show_alert=True)
+            return
+        
+        executor_name = executor.full_name or f"ID: {executor_id}"
+        
+        await _show_admin_executor_tasks_page(callback_query, executor_id, executor_name, tasks, page=page, is_callback=True)
+    except Exception as e:
+        logger.error(f"Error paginating executor tasks for admin: {e}", exc_info=True)
+        await callback_query.answer("❌ Ошибка при переключении страницы.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_refresh_executor_tasks:"))
+async def admin_refresh_executor_tasks_callback(callback_query: CallbackQuery, state: FSMContext):
+    """Обработчик обновления списка задач исполнителя для админа."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ У вас нет прав.", show_alert=True)
+        return
+    
+    try:
+        executor_id = int(callback_query.data.split(":")[1])
+        await callback_query.answer("⏳ Обновление списка...")
+        
+        # Очищаем кэш для принудительного обновления
+        cache.delete(f"admin_executor_tasks:{executor_id}")
+        
+        # Вызываем обработчик просмотра задач исполнителя
+        # Создаем временный callback для вызова admin_view_executor_tasks
+        class FakeCallback:
+            def __init__(self, original_callback, data):
+                self.from_user = original_callback.from_user
+                self.message = original_callback.message
+                self.data = data
+                self.answer = original_callback.answer
+        
+        fake_callback = FakeCallback(callback_query, f"admin_view_executor_tasks:{executor_id}")
+        await admin_view_executor_tasks(fake_callback, state)
+    except Exception as e:
+        logger.error(f"Error refreshing executor tasks for admin: {e}", exc_info=True)
+        await callback_query.answer("❌ Ошибка при обновлении списка.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin_view_executor:"))
